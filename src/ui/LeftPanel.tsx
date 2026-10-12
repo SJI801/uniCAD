@@ -8,7 +8,7 @@
  * impossible to repeat.
  */
 
-import { Fragment, useMemo, useState } from 'react';
+import { Fragment, useEffect, useMemo, useState } from 'react';
 import { useEditor, selectedEntities } from '../state/editorStore';
 import DatumPanel from './DatumPanel';
 import type { CadDocument, Entity, Layer, LineStyle, Vec2 } from '../core/types';
@@ -46,6 +46,17 @@ export default function LeftPanel(): React.ReactElement {
   const select = useEditor((s) => s.select);
 
   const [tab, setTab] = useState<'layers' | 'properties' | 'datum'>('layers');
+
+  // 饼菜单的「属性」扇区（以及将来任何命令）能把这一页掀开：走既有的 unicad:* 事件
+  // 通道，免得把「当前标签页」这种局部 UI 状态提升进 store。
+  useEffect(() => {
+    const onPanel = (e: Event): void => {
+      const want = (e as CustomEvent<string>).detail;
+      if (want === 'properties' || want === 'layers' || want === 'datum') setTab(want);
+    };
+    window.addEventListener('unicad:panel', onPanel);
+    return () => window.removeEventListener('unicad:panel', onPanel);
+  }, []);
 
   const selectionList = useMemo(() => selectedEntities(useEditor.getState()), [selection, doc]);
 
@@ -328,6 +339,7 @@ function SingleProps({
         <span className="constraint-glyph">R</span> 这类记号的参数是<b>尺寸</b>：
         改它会写成一条持久约束（右下「几何约束」列表里可见、可删），
         之后它会一直守住这个值，与它相关的图元跟着动。
+        <b>画布上那条尺寸标注也能双击就地改值</b>（直线长度 / 圆与弧的半径）。
         所有修改都进撤销栈。
       </p>
     </div>

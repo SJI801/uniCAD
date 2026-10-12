@@ -85,6 +85,29 @@ function setLength(e: Entity, v: number): Entity {
 }
 
 describe('0.2 改值即驱动', () => {
+  it('0.1 的验收原文：两线距离 50 → 右栏改 80 → 图形跟着变', () => {
+    const layer = S().doc.currentLayer;
+    install([line('a', 0, 0, 50, 0, layer), line('b', 100, 0, 150, 0, layer)]);
+    S().select(['a', 'b']);
+    S().addConstraintAction('distance');
+    const dim = S().doc.constraints[0]!;
+    expect(dim.kind).toBe('distance');
+    expect(dim.value).toBeCloseTo(50, 9);
+
+    // 右栏那一行数值框走的就是这个动作
+    S().setConstraintValueAction(dim.id, 80);
+    const a = ent('a') as LineEntity;
+    const b = ent('b') as LineEntity;
+    const d = Math.hypot(b.a.x - a.b.x, b.a.y - a.b.y);
+    expect(d).toBeCloseTo(80, 6);
+    expect(S().doc.constraints[0]!.value).toBeCloseTo(80, 9);
+    // 一次撤销：值与几何一起回来
+    S().undo();
+    const a2 = ent('a') as LineEntity;
+    const b2 = ent('b') as LineEntity;
+    expect(Math.hypot(b2.a.x - a2.b.x, b2.a.y - a2.b.y)).toBeCloseTo(50, 6);
+  });
+
   it('改圆半径 → 相切的线跟着走；约束留下来；一次撤销全回去', () => {
     const layer = S().doc.currentLayer;
     install([circle('c', 0, 0, 20, layer), line('l', 20, -30, 20, 30, layer)]);
@@ -180,5 +203,101 @@ describe('0.2 改值即驱动', () => {
     expect(l.b.x).toBeCloseTo(0, 9);
     expect(l.b.y).toBeCloseTo(50, 9);
     expect(S().doc.constraints).toHaveLength(0);
+  });
+});
+
+describe('0.2 画布标注就地改值（双击标注走的那条路）', () => {
+  const ctx = {
+    scale: 1,
+    viewWidth: 900,
+    viewHeight: 600,
+    screenOf: (p: { x: number; y: number }) => ({ x: p.x, y: p.y }),
+  };
+
+  /** 与 CanvasView.onDimDoubleClick 同形的查表：标注 → 参数行。 */
+  const fieldOf = async (entityId: string, fieldKey: string) => {
+    const { propField } = await import('./src/core/props');
+    const e = S().doc.entities.find((x) => x.id === entityId)!;
+    return propField(e, S().doc, fieldKey);
+  };
+
+  it('直线 / 圆 / 弧的主尺寸带 edit；椭圆与多段线不带（没有对应约束种类）', async () => {
+    const { selectedDimensions } = await import('./src/render/dims');
+    const layer = S().doc.currentLayer;
+    const ellipse = {
+      id: 'el',
+      type: 'ellipse' as const,
+      layer,
+      color: null,
+      lineStyle: null,
+      lineWeight: null,
+      center: { x: 0, y: 0 },
+      rx: 30,
+      ry: 10,
+      rotation: 0,
+    };
+    const pl = {
+      id: 'p',
+      type: 'polyline' as const,
+      layer,
+      color: null,
+      lineStyle: null,
+      lineWeight: null,
+      points: [
+        { x: 0, y: 0 },
+        { x: 40, y: 0 },
+      ],
+      closed: false,
+    };
+    install([
+      line('l', 0, 0, 50, 0, layer),
+      circle('c', 0, 0, 20, layer),
+      ellipse,
+      pl,
+    ]);
+    const ids = new Set(['l', 'c', 'el', 'p']);
+    const { labels } = selectedDimensions(S().doc.entities, ids, ctx);
+    const editOf = (id: string) => labels.find((x) => x.edit?.entity === id)?.edit;
+
+    expect(editOf('l')).toEqual({ entity: 'l', fieldKey: 'length' });
+    expect(editOf('c')).toEqual({ entity: 'c', fieldKey: 'radius' });
+    expect(editOf('el')).toBeUndefined();
+    expect(editOf('p')).toBeUndefined();
+    // 可改值的标注必须说清改的是哪一项（一条标注常同时显示两个量）
+    expect(labels.find((x) => x.edit?.entity === 'c')?.title).toContain('半径');
+    expect(labels.find((x) => x.edit?.entity === 'l')?.title).toContain('长度');
+  });
+
+  it('标注 → propField → setDimensionAction：改半径，相切的线跟着走', async () => {
+    const { selectedDimensions } = await import('./src/render/dims');
+    const layer = S().doc.currentLayer;
+    install([circle('c', 0, 0, 20, layer), line('l', 20, -30, 20, 30, layer)]);
+    S().select(['c', 'l']);
+    S().addConstraintAction('tangent');
+    S().select(['c']);
+
+    // ① 画布上那条标注
+    const { labels } = selectedDimensions(S().doc.entities, S().selection, ctx);
+    const edit = labels.find((x) => x.edit)!.edit!;
+    expect(edit).toEqual({ entity: 'c', fieldKey: 'radius' });
+
+    // ② 查表拿到那一行（规则只有 props.ts 一份）
+    const field = (await fieldOf(edit.entity, edit.fieldKey))!;
+    expect(field.label).toBe('半径');
+    expect(field.dimension?.kind).toBe('radius');
+
+    // ③ 提交：与 CanvasView.commitDimDraft 同形
+    const raw = 35;
+    S().setDimensionAction(
+      edit.entity,
+      field.dimension!.kind,
+      field.dimension!.toValue(raw),
+      (e) => field.applyTo!(e, raw),
+      `改尺寸: ${field.label} = ${raw}`,
+    );
+
+    expect((ent('c') as CircleEntity).radius).toBeCloseTo(35, 9);
+    expect(Math.abs(lineDistance(ent('l') as LineEntity, { x: 0, y: 0 }))).toBeCloseTo(35, 9);
+    expect(S().doc.constraints.find((x) => x.kind === 'radius')?.value).toBeCloseTo(35, 9);
   });
 });

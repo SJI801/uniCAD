@@ -167,6 +167,25 @@ export interface PropSection {
 export const MAX_VERTEX_ROWS = 64;
 
 /**
+ * One parameter row of one entity, by key — the lookup the **canvas** needs.
+ *
+ * 画布上的尺寸标注要就地改值，但它只知道自己挂在哪条曲线的哪一行上（`fieldKey`），
+ * 值怎么显示、怎么落成几何、写成哪种约束，全都已经在 `props.ts` 这张表里写好了。
+ * 让画布来这里查一行，而不是在 `render/dims.ts` 里复述一遍规则——两份真相必然打架。
+ */
+export function propField(
+  entity: Entity,
+  doc: CadDocument,
+  key: string,
+): PropField | undefined {
+  for (const section of describeEntityProps(entity, doc)) {
+    const found = section.fields.find((f) => f.key === key);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+/**
  * A row that is genuinely informational — no edit is possible in principle.
  *
  * Kept as an explicit kind rather than "a field that happens to have no

@@ -15,6 +15,7 @@ export default defineConfig({
       '_probe_dimension.test.ts',
       '_probe_tangent.test.ts',
       '_probe_dof.test.ts',
+      '_probe_pie.test.ts',
     ],
     pool: 'threads',
     environment: 'node',

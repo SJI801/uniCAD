@@ -654,6 +654,8 @@ body {
   font-variant-numeric: tabular-nums;
   line-height: 1.5;
   white-space: nowrap;
+  /* 标注是 chrome，不是可复制的正文；也免得双击进编辑时先把文字选蓝。 */
+  user-select: none;
   /* 每帧只动 transform，交给合成层，不触发重排。 */
   will-change: transform;
 }
@@ -674,6 +676,40 @@ body {
 .dim-label.selected {
   border-color: #8a6520;
   color: #ffb020;
+}
+
+/* 可改值的尺寸标注（直线长度 / 圆与弧的半径）：双击就地改。
+   整层是 pointer-events: none，所以这一条要自己打开——代价是它那一小块盖住的
+   画布拾取不到，与约束徽章同一取舍（13×13 的量级）。 */
+.dim-label.editable {
+  pointer-events: auto;
+  cursor: text;
+}
+
+/* 就地编辑的输入框：与标注共用同一套定位（--dx/--dy 都按 translate(-50%,-50%)
+   居中），所以它正好盖在刚双击的那条标注上，不需要另算坐标。 */
+.dim-edit {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform: translate(-50%, -50%) translate(var(--dx, 0), var(--dy, 0));
+  width: 92px;
+  padding: 1px 7px;
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  background: rgba(16, 19, 24, 0.96);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11px;
+  text-align: center;
+  outline: none;
+  pointer-events: auto;
+}
+
+@media (prefers-color-scheme: light) {
+  .dim-edit {
+    background: rgba(255, 255, 255, 0.96);
+  }
 }
 
 /* 约束标记：一个字符宽的小徽章，挂在被约束的点旁边。
@@ -1315,6 +1351,107 @@ button.status-chip:hover {
 .status-spacer {
   flex: 1 1 auto;
 }
+
+/* --------------------------------------------------------------------------
+   右键饼菜单
+   -------------------------------------------------------------------------- */
+
+/* 背板：饼开着时吞掉落在任何地方的点击，免得"点扇区"顺手在图上画了一笔。
+   与饼同层（都在 body 的 portal 里），所以是 fixed 而不是 absolute。 */
+.pie-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+}
+
+.pie-menu {
+  position: fixed;
+  z-index: 91;
+  pointer-events: auto;
+  /* 扇区颜色由 CSS 给，组件只管几何。 */
+  --pie-bg: rgba(20, 24, 30, 0.94);
+  --pie-bg-hi: #2b3542;
+  --pie-line: var(--border-strong);
+  --pie-text: var(--text);
+  --pie-off: rgba(255, 255, 255, 0.28);
+  /* 长标签宁可溢出也不要被 viewBox 切掉——「显示不完整」正是要修的那件事。 */
+  overflow: visible;
+}
+
+@media (prefers-color-scheme: light) {
+  .pie-menu {
+    --pie-bg: rgba(250, 251, 252, 0.96);
+    --pie-bg-hi: #dde5ee;
+    --pie-off: rgba(0, 0, 0, 0.3);
+  }
+}
+
+.pie-sector path,
+.pie-leaf path {
+  fill: var(--pie-bg);
+  stroke: var(--pie-line);
+  stroke-width: 1;
+  cursor: pointer;
+}
+
+.pie-sector:hover path,
+.pie-sector.open path,
+.pie-leaf:hover path {
+  fill: var(--pie-bg-hi);
+}
+
+/* 置灰：仍然画出来（给 title 说明原因），只是明显退到后面。 */
+.pie-sector.off path {
+  cursor: not-allowed;
+  stroke-dasharray: 3 3;
+}
+
+.pie-sector.off .pie-glyph,
+.pie-sector.off .pie-text,
+.pie-leaf.off .pie-glyph,
+.pie-leaf.off .pie-text {
+  fill: var(--pie-off);
+}
+
+/* 冲突扇区：与草图上的警示红同一族色，看见就知道要处理。 */
+.pie-sector.danger path {
+  stroke: #ff5d5d;
+  stroke-width: 2;
+}
+
+.pie-sector.danger .pie-glyph,
+.pie-sector.danger .pie-text {
+  fill: #ff8a80;
+}
+
+.pie-core {
+  fill: none;
+  stroke: var(--pie-line);
+}
+
+.pie-core-text {
+  fill: var(--pie-text);
+  font-family: var(--mono);
+  font-size: 10px;
+  text-anchor: middle;
+  opacity: 0.7;
+}
+
+.pie-glyph {
+  fill: var(--pie-text);
+  font-size: 13px;
+  text-anchor: middle;
+  pointer-events: none;
+}
+
+.pie-text {
+  fill: var(--pie-text);
+  font-family: var(--mono);
+  font-size: 9px;
+  text-anchor: middle;
+  pointer-events: none;
+}
+
 
 .inline-select {
   background: transparent;

@@ -20,7 +20,7 @@
  * interaction, so they take no part in undo, saving, or DXF export.
  */
 
-import { fmt, fmtAngle, type Entity, type Vec2 } from '../core/types';
+import { fmt, fmtAngle, type Entity, type EntityId, type Vec2 } from '../core/types';
 import { boundsCenter, entityBoundsTS, unionBounds } from '../core/entities';
 import type { OverlaySegment } from './overlay';
 import { UI_COLORS } from './style';
@@ -36,11 +36,20 @@ export interface DimLabel {
    */
   kind: 'live' | 'selected' | 'constraint' | 'dof';
   /**
-   * Hover text. Only constraint badges set it — a dimension's text *is* its
-   * meaning, but a one-character badge needs the full sentence spelled out or it
-   * is just decoration.
+   * Hover text. Constraint badges set it; so do the editable dimensions, which
+   * have to say *which* number a double-click will change.
    */
   title?: string;
+  /**
+   * 就地改值：这条标注对应哪个图元的哪一行参数（`core/props.ts` 的 `fieldKey`）。
+   *
+   * 只标**主尺寸**——一条标注常常同时显示两个量（`R 20 ⌀ 40`、`50 ∠26.57°`），
+   * 双击到底改哪个必须没有歧义，所以能改的就是「一眼读出这个对象有多大的那个」
+   * （直线长度 / 圆与弧的半径），其余（角度、直径、周长、面积、椭圆半轴、多段线
+   * 总长）留给属性面板——它们要么没有对应的约束种类，要么是同一件事的另一种说法。
+   * `title` 里写明改的是哪一项，悬停即可确认。
+   */
+  edit?: { entity: EntityId; fieldKey: string };
 }
 
 export interface DimensionDraw {
@@ -206,7 +215,14 @@ export function selectedDimensions(
     const l = leader(spec.from, spec.to, ctx, spec.offsetPx, UI_COLORS.selected, center);
     if (!l) continue;
     segments.push(...l.segments);
-    labels.push({ x: l.anchor.x, y: l.anchor.y, text: spec.text, kind: 'selected' });
+    labels.push({
+      x: l.anchor.x,
+      y: l.anchor.y,
+      text: spec.text,
+      kind: 'selected',
+      ...(spec.title === undefined ? {} : { title: spec.title }),
+      ...(spec.edit === undefined ? {} : { edit: { entity: e.id, fieldKey: spec.edit.fieldKey } }),
+    });
   }
   return { segments, labels };
 }
@@ -217,6 +233,10 @@ interface DimSpec {
   text: string;
   /** 尺寸线离图元多远（屏幕像素）。0 = 就贴在图元上（半径 / 半轴）。 */
   offsetPx: number;
+  /** 就地改值的那一行（见 `DimLabel.edit`）；没有就不给改。 */
+  edit?: { fieldKey: string };
+  /** 可改值的标注必须说清改的是哪一项。 */
+  title?: string;
 }
 
 /**
@@ -225,6 +245,10 @@ interface DimSpec {
  * 规则是「一眼能读出这个对象有多大的那个量」，而不是把能算的都列上：
  * 直线给长度 + 方位角，圆给半径 + 直径，圆弧额外给圆心角与弧长，
  * 多段线给总长（逐段标会在每个拐角堆出一个数字）。
+ *
+ * 其中**主尺寸**（直线长度、圆与弧的半径）可以在画布上双击就地改值，所以它们
+ * 带 `edit` + `title`；其余只显示。椭圆半轴与多段线总长没有对应的约束种类
+ * （见 `buildEntityDimension`），所以不给双击——给了才是骗人。
  */
 function dimensionSpec(e: Entity): DimSpec | null {
   switch (e.type) {
@@ -238,6 +262,8 @@ function dimensionSpec(e: Entity): DimSpec | null {
         to: e.b,
         offsetPx: SEG.offset,
         text: `${fmt(len)}  ∠${fmtAngle(Math.atan2(dy, dx))}`,
+        edit: { fieldKey: 'length' },
+        title: `双击改长度（Enter 提交 / Esc 取消）—— 会写入「距离」尺寸约束。方位角请在左栏属性面板改。`,
       };
     }
 
@@ -278,6 +304,8 @@ function dimensionSpec(e: Entity): DimSpec | null {
         to: { x: e.center.x + e.radius, y: e.center.y },
         offsetPx: 0,
         text: `R ${fmt(e.radius)}  ⌀ ${fmt(e.radius * 2)}`,
+        edit: { fieldKey: 'radius' },
+        title: `双击改半径（Enter 提交 / Esc 取消）—— 会写入「半径」尺寸约束。直径 / 周长 / 面积在左栏属性面板。`,
       };
     }
 
@@ -292,6 +320,8 @@ function dimensionSpec(e: Entity): DimSpec | null {
         },
         offsetPx: 0,
         text: `R ${fmt(e.radius)}  ${fmtAngle(sweep)}  弧长 ${fmt(e.radius * sweep)}`,
+        edit: { fieldKey: 'radius' },
+        title: `双击改半径（Enter 提交 / Esc 取消）—— 会写入「半径」尺寸约束。角度与弧长在左栏属性面板。`,
       };
     }
 

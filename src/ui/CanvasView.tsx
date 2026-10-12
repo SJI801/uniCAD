@@ -7,6 +7,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import { GlRenderer, hexToRgba, type RenderStyle } from '../render/gl';
 import { clampPitch, hitPlane, pickPlane, viewProj } from '../render/orbit';
 import { buildGrid } from '../render/grid';
@@ -27,6 +28,8 @@ import {
 } from '../render/dims';
 import { constraintBadges, constraintGuides } from '../render/constraintMarks';
 import { dofMarkers } from '../render/dofMarks';
+import PieMenu from './PieMenuView';
+import { buildPieMenu, runPieAction } from './pieMenu';
 import { useEditor } from '../state/editorStore';
 import {
   SceneBuffer,
@@ -48,7 +51,8 @@ import {
   planeOf,
   CONSTRAINT_TAG,
 } from '../core/types';
-import type { DocPlane, Entity, Mat, Vec2 } from '../core/types';
+import type { DocPlane, Entity, EntityId, Mat, Vec2 } from '../core/types';
+import { propField } from '../core/props';
 import { isPickable, isSnappable, isVisible, entityBoundsTS, resolveStyle, arcPointAt } from '../core/entities';
 import { adaptiveGridSpacing, clipMatrixOf } from '../render/camera';
 
@@ -126,6 +130,32 @@ export default function CanvasView(): React.ReactElement {
   /** Log a render-frame failure once, not once per frame. */
   const frameErrorRef = useRef(false);
 
+  /**
+   * 画布上正在就地编辑的尺寸（ROADMAP 0.2 的「尺寸标签改值」）。
+   *
+   * 放在 React state 而不是那个每帧重建的标注池里：编辑期间**不能**被渲染循环
+   * 覆写。池子照旧每帧更新（标注还在原位、只是被输入框盖住），输入框自己独立
+   * 渲染在它上面——两条路互不干扰，也不需要让渲染循环知道「有人在打字」。
+   */
+  const [dimDraft, setDimDraft] = useState<{
+    entity: EntityId;
+    fieldKey: string;
+    label: string;
+    x: number;
+    y: number;
+    text: string;
+  } | null>(null);
+  /** Esc 取消：blur 也会触发提交，所以取消要留个标记。 */
+  const dimCancelRef = useRef(false);
+
+  /**
+   * 右键饼菜单的落点（画布内 CSS 像素 + 模型坐标）。`null` = 没开。
+   *
+   * 放 React state 而不是 imperative DOM：它一帧里最多变一次，且要在文档/选择变化时
+   * 跟着重算内容（扇区的可用性就是选择的函数）。
+   */
+  const [pie, setPie] = useState<{ x: number; y: number; world: Vec2 } | null>(null);
+
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [scaleBar, setScaleBar] = useState('');
@@ -134,6 +164,10 @@ export default function CanvasView(): React.ReactElement {
   const doc = useEditor((s) => s.doc);
   const view = useEditor((s) => s.view);
   const selection = useEditor((s) => s.selection);
+  // 饼菜单的内容是「选择 + 工具 + 视图状态」的函数，所以这三项要订阅着。
+  const activeTool = useEditor((s) => s.activeTool);
+  const view3d = useEditor((s) => s.view3d);
+  const constraintReport = useEditor((s) => s.constraintReport);
   // Reactive kernel state, so the HUD badge disappears the moment the module
   // finishes loading instead of being frozen at its first-render value.
   const kernelReady = useEditor((s) => s.kernelReady);
@@ -484,8 +518,8 @@ export default function CanvasView(): React.ReactElement {
       }
 
       if (ev.button === 2) {
-        // Right-click: let the tool decide (usually "finish").
-        window.dispatchEvent(new CustomEvent('unicad:right-click', { detail: world }));
+        // 右键现在是饼菜单的手势（见 onContextMenu）：「结束/取消」在饼里，
+        // 走的是同一个 `unicad:right-click` 事件，所以工具那边的语义不用改。
         return;
       }
 
@@ -666,7 +700,74 @@ export default function CanvasView(): React.ReactElement {
 
   const onContextMenu = useCallback((ev: React.MouseEvent): void => {
     ev.preventDefault();
+    // 饼菜单的手势入口。拖动中不弹（正在画/正在移的时候右键只可能是误触）。
+    if (dragRef.current.kind !== 'none') return;
+    // **窗口坐标**：饼渲染在 body 的 portal 里、用 position: fixed 定位，从此不受
+    // 画布宿主 `overflow: hidden` 的裁剪，也不必跟着画布的缩放平移换算。
+    setPie({ x: ev.clientX, y: ev.clientY, world: toWorld(localScreen(ev)) });
+  }, [localScreen, toWorld]);
+
+  /**
+   * 双击一条**可改值**的尺寸标注 → 就地编辑（0.2）。
+   *
+   * 标注池里的每个节点带着 `dataset.entity` / `dataset.field`（见 `syncDimLayer`），
+   * 所以这里只认「哪条曲线的哪一行」，值怎么显示、怎么落成几何、写成哪种约束，
+   * 全都去 `props.ts` 那张表里查（`propField`）——和左栏属性面板**同一份规则**。
+   */
+  const onDimDoubleClick = useCallback((ev: React.MouseEvent<HTMLDivElement>): void => {
+    const node = (ev.target as HTMLElement).closest('.dim-label') as HTMLElement | null;
+    const entityId = node?.dataset['entity'];
+    const fieldKey = node?.dataset['field'];
+    if (!node || !entityId || !fieldKey) return;
+    // 画布自己也听双击（工具用它收尾）：落在标注上的一次双击只属于标注。
+    ev.stopPropagation();
+    ev.preventDefault();
+
+    const state = useEditor.getState();
+    const entity = state.doc.entities.find((e) => e.id === entityId);
+    if (!entity) return;
+    const field = propField(entity, state.doc, fieldKey);
+    if (!field || typeof field.value !== 'number') return;
+
+    const x = Number.parseFloat(node.style.getPropertyValue('--dx')) || 0;
+    const y = Number.parseFloat(node.style.getPropertyValue('--dy')) || 0;
+    setDimDraft({
+      entity: entityId,
+      fieldKey,
+      label: field.label,
+      x,
+      y,
+      text: String(field.value),
+    });
   }, []);
+
+  /** 提交草稿：与左栏属性面板走**同一个**动作（写约束 → 解算 → 一条命令回写）。 */
+  const commitDimDraft = useCallback((): void => {
+    const draft = dimDraft;
+    setDimDraft(null);
+    if (!draft) return;
+    if (dimCancelRef.current) {
+      dimCancelRef.current = false;
+      return;
+    }
+    const raw = Number(draft.text.trim());
+    if (!Number.isFinite(raw) || !(raw > 0)) {
+      pushLog('尺寸必须大于 0');
+      return;
+    }
+    const state = useEditor.getState();
+    const entity = state.doc.entities.find((e) => e.id === draft.entity);
+    const field = entity ? propField(entity, state.doc, draft.fieldKey) : undefined;
+    const dim = field?.dimension;
+    if (!field || !dim || !field.applyTo) return;
+    state.setDimensionAction(
+      draft.entity,
+      dim.kind,
+      dim.toValue(raw),
+      (e) => field.applyTo!(e, raw),
+      `改尺寸: ${field.label} = ${raw}`,
+    );
+  }, [dimDraft, pushLog]);
 
   // -------------------------------------------------------------------------
   // Render loop
@@ -1223,7 +1324,59 @@ export default function CanvasView(): React.ReactElement {
       onContextMenu={onContextMenu}
     >
       <canvas ref={canvasRef} className="canvas-gl" />
-      <div className="dim-layer" ref={dimLayerRef} aria-hidden />
+      <div className="dim-layer" ref={dimLayerRef} onDoubleClick={onDimDoubleClick} aria-hidden />
+      {pie &&
+        createPortal(
+          <>
+            {/* 背板：饼开着时吞掉落在任何地方的点击（否则等于"点哪儿画哪儿"）。 */}
+            <div className="pie-backdrop" onPointerDown={() => setPie(null)} />
+            <PieMenu
+              at={{ x: pie.x, y: pie.y }}
+              sectors={buildPieMenu({
+                doc,
+                selected: doc.entities.filter((e) => selection.has(e.id)),
+                activeTool,
+                view3d,
+                report: constraintReport,
+              })}
+              onRun={(action) => {
+                runPieAction(action, useEditor.getState(), pie.world);
+                setPie(null);
+              }}
+              onClose={() => setPie(null)}
+            />
+          </>,
+          document.body,
+        )}
+      {dimDraft && (
+        <input
+          className="dim-edit"
+          autoFocus
+          value={dimDraft.text}
+          title={`改${dimDraft.label}（Enter 提交 · Esc 取消）`}
+          style={{
+            ['--dx' as string]: `${Math.round(dimDraft.x)}px`,
+            ['--dy' as string]: `${Math.round(dimDraft.y)}px`,
+          }}
+          onChange={(ev) => setDimDraft({ ...dimDraft, text: ev.target.value })}
+          onBlur={commitDimDraft}
+          onKeyDown={(ev) => {
+            if (ev.key === 'Enter') {
+              ev.preventDefault();
+              ev.currentTarget.blur();
+            } else if (ev.key === 'Escape') {
+              ev.preventDefault();
+              dimCancelRef.current = true;
+              ev.currentTarget.blur();
+            }
+          }}
+          // 输入框上的指针 / 滚轮 / 双击都不该漏给画布（否则会顺手开始框选或缩放）。
+          onPointerDown={(ev) => ev.stopPropagation()}
+          onPointerUp={(ev) => ev.stopPropagation()}
+          onWheel={(ev) => ev.stopPropagation()}
+          onDoubleClick={(ev) => ev.stopPropagation()}
+        />
+      )}
       <div className="canvas-hud">
         <span className="hud-item">{scaleBar}</span>
         {!kernelReady && <span className="hud-item warn">TS 降级模式</span>}
@@ -1264,14 +1417,28 @@ function syncDimLayer(layer: HTMLDivElement | null, labels: readonly DimLabel[])
       node = document.createElement('span');
       layer.appendChild(node);
     }
-    const cls = `dim-label ${l.kind}`;
+    // 可改值的标注多一个修饰类：它要接收指针事件（双击进编辑），
+    // 而 `.dim-layer` 整层是 `pointer-events: none`。
+    const cls = `dim-label ${l.kind}${l.edit ? ' editable' : ''}`;
     if (node.className !== cls) node.className = cls;
     if (node.textContent !== l.text) node.textContent = l.text;
-    // `title` is only present on constraint badges; clearing it on the others
-    // matters because the pool reuses nodes across frames — a stale tooltip
-    // would outlive the constraint that put it there.
+    // `title` is only present on constraint badges and editable dimensions;
+    // clearing it on the others matters because the pool reuses nodes across
+    // frames — a stale tooltip would outlive the thing that put it there.
     const title = l.title ?? '';
     if (node.title !== title) node.title = title;
+    // 双击处理器靠 dataset 认出「哪条曲线的哪一行」——池子里的节点每帧可能换身份，
+    // 所以两个字段都要跟着更新与清除。
+    const entity = l.edit?.entity ?? '';
+    const field = l.edit?.fieldKey ?? '';
+    if (node.dataset['entity'] !== entity) {
+      if (entity === '') delete node.dataset['entity'];
+      else node.dataset['entity'] = entity;
+    }
+    if (node.dataset['field'] !== field) {
+      if (field === '') delete node.dataset['field'];
+      else node.dataset['field'] = field;
+    }
     // 取整到整数像素：亚像素位移会让文字每帧重新光栅化，糊成一团。
     const dx = `${Math.round(l.x)}px`;
     const dy = `${Math.round(l.y)}px`;
