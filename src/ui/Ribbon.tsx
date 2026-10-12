@@ -558,7 +558,7 @@ export default function Ribbon(props: RibbonProps): React.ReactElement {
           <button
             className={`tool-btn wide ${sketchColors ? 'active' : ''}`}
             onClick={toggleSketchColors}
-            title="约束状态配色：还缺尺寸或方位约束的图元画成蓝色（只剩位置未定的不染——本版本没有锚点约束）"
+            title="约束状态配色：还缺尺寸或方位约束的图元画成蓝色（只是位置没定的不染——用「约束 ▾ → 固定」把点钉住即可）"
           >
             状态配色
           </button>
