@@ -161,6 +161,11 @@ export interface EditorState {
   /** 起点/终点标色小圆点（绿=起，红=终）。 */
   endpointsVisible: boolean;
   /**
+   * 约束状态配色（ROADMAP 0.3 的「草图颜色提示」）：还缺**尺寸或方位**约束的图元画成
+   * 欠定义蓝。默认关闭——绘图颜色在这套里属于图层/图元属性，未经允许覆盖它是越权。
+   */
+  sketchColors: boolean;
+  /**
    * 「完全定义」模式：开启后，挂着约束的图元拒绝拖动——草图进入只读态，
    * 形状只能通过改尺寸驱动。默认关闭，不改变既有交互。
    */
@@ -261,6 +266,8 @@ export interface EditorState {
   toggleConstraints(): void;
   setEndpointsVisible(visible: boolean): void;
   toggleEndpoints(): void;
+  setSketchColors(on: boolean): void;
+  toggleSketchColors(): void;
   setFullyConstrained(visible: boolean): void;
   toggleFullyConstrained(): void;
   setRibbonCollapsed(collapsed: boolean): void;
@@ -334,6 +341,7 @@ const MAX_LOG = 200;
 const RIBBON_COLLAPSED_KEY = 'unicad.ui.ribbonCollapsed';
 const CONSTRAINTS_VISIBLE_KEY = 'unicad.ui.constraintsVisible';
 const ENDPOINTS_VISIBLE_KEY = 'unicad.ui.endpointsVisible';
+const SKETCH_COLORS_KEY = 'unicad.ui.sketchColors';
 const FULLY_CONSTRAINED_KEY = 'unicad.ui.fullyConstrained';
 
 /**
@@ -413,6 +421,8 @@ export const useEditor = create<EditorState>((set, get) => ({
   dimsVisible: true,
   constraintsVisible: readUiFlag(CONSTRAINTS_VISIBLE_KEY, true),
   endpointsVisible: readUiFlag(ENDPOINTS_VISIBLE_KEY, true),
+  // 默认关：它覆盖图层颜色，得由用户显式打开（见字段注释）。
+  sketchColors: readUiFlag(SKETCH_COLORS_KEY, false),
   fullyConstrained: readUiFlag(FULLY_CONSTRAINED_KEY, false),
   constraintReport: null,
   ribbonCollapsed: readUiFlag(
@@ -1092,6 +1102,21 @@ export const useEditor = create<EditorState>((set, get) => ({
     const visible = !get().endpointsVisible;
     get().setEndpointsVisible(visible);
     get().pushLog(visible ? '端点标色: 显示' : '端点标色: 隐藏');
+  },
+
+  setSketchColors(on) {
+    writeUiFlag(SKETCH_COLORS_KEY, on);
+    set({ sketchColors: on });
+  },
+
+  toggleSketchColors() {
+    const on = !get().sketchColors;
+    get().setSketchColors(on);
+    get().pushLog(
+      on
+        ? '约束状态配色: 开（蓝色 = 还缺尺寸或方位约束；只剩位置未定的不染——本版本没有锚点约束）'
+        : '约束状态配色: 关',
+    );
   },
 
   setFullyConstrained(visible) {

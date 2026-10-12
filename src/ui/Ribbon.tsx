@@ -82,6 +82,8 @@ export default function Ribbon(props: RibbonProps): React.ReactElement {
   const toggleConstraints = useEditor((s) => s.toggleConstraints);
   const toggleEndpoints = useEditor((s) => s.toggleEndpoints);
   const endpointsVisible = useEditor((s) => s.endpointsVisible);
+  const toggleSketchColors = useEditor((s) => s.toggleSketchColors);
+  const sketchColors = useEditor((s) => s.sketchColors);
   const toggleFullyConstrained = useEditor((s) => s.toggleFullyConstrained);
   const fullyConstrained = useEditor((s) => s.fullyConstrained);
 
@@ -552,6 +554,13 @@ export default function Ribbon(props: RibbonProps): React.ReactElement {
             title="起点绿点 / 终点红点：显示图元方向"
           >
             端点标色
+          </button>
+          <button
+            className={`tool-btn wide ${sketchColors ? 'active' : ''}`}
+            onClick={toggleSketchColors}
+            title="约束状态配色：还缺尺寸或方位约束的图元画成蓝色（只剩位置未定的不染——本版本没有锚点约束）"
+          >
+            状态配色
           </button>
         </div>
         <div className="ribbon-group-label">几何约束</div>

@@ -639,6 +639,18 @@ export const DOF_MODE = {
 } as const;
 
 /**
+ * 这个图元**还缺东西**吗（ROADMAP 0.3 的「草图颜色提示」用）。
+ *
+ * 判定刻意只认**尺寸与方位**（`size` / `rot`）：那才是「还能再加一条约束把它定住」的
+ * 自由度。**只差平移不算** —— 本版本没有锚点/固定约束（内核里一个都没有），位置本来
+ * 就钉不掉；把它算进来，整张图会永远显示"欠定义"，提示随之失去意义。等 `fixed`
+ * 锚点落地后，这里再收紧成「modes === 0 才算定完」。
+ */
+export function isUnderDefined(modes: number | undefined): boolean {
+  return modes !== undefined && (modes & (DOF_MODE.rot | DOF_MODE.size)) !== 0;
+}
+
+/**
  * Analyze the **active sketch**: the entities on the active datum plane, against
  * every constraint that references them.
  *

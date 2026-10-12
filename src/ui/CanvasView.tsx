@@ -28,6 +28,7 @@ import {
 } from '../render/dims';
 import { constraintBadges, constraintGuides } from '../render/constraintMarks';
 import { dofMarkers } from '../render/dofMarks';
+import { isUnderDefined } from '../core/constraints';
 import PieMenu from './PieMenuView';
 import { buildPieMenu, runPieAction } from './pieMenu';
 import { useEditor } from '../state/editorStore';
@@ -1106,11 +1107,14 @@ export default function CanvasView(): React.ReactElement {
       const styles: Array<RenderStyle | null> = visible.map((e: Entity) => {
         const st = state.selection.has(e.id);
         const hv = state.hover === e.id;
+        const report = state.constraintReport;
         return resolveRenderStyle(d, e, {
           selected: st,
           hovered: hv,
           // 冲突图元画警示红（0.3）：约束互相矛盾时，先让人看见是哪几条曲线。
-          conflicting: state.constraintReport?.conflictingEntities.has(e.id) ?? false,
+          conflicting: report?.conflictingEntities.has(e.id) ?? false,
+          // 约束状态配色（0.3）：还缺尺寸/方位的图元画欠定义蓝——默认关，见 store 字段注释。
+          underDefined: state.sketchColors && isUnderDefined(report?.freeModes.get(e.id)),
         });
       });
 

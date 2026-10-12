@@ -40,7 +40,7 @@ export type PieAction =
   | { kind: 'removeConstraints' }
   | { kind: 'property' }
   | { kind: 'zoomFit' }
-  | { kind: 'toggle'; value: 'grid' | 'dims' | 'constraints' | 'endpoints' }
+  | { kind: 'toggle'; value: 'grid' | 'dims' | 'constraints' | 'endpoints' | 'sketchColors' }
   | { kind: 'view3d'; on: boolean }
   /** 冲突项在组装时就抄进来（模型纯数据，分发端不需要再摸一遍文档）。 */
   | { kind: 'conflicts'; entities: EntityId[]; lines: string[] };
@@ -299,6 +299,13 @@ export function buildPieMenu(input: PieInput): PieSector[] {
           action: { kind: 'toggle', value: 'endpoints' },
           enabled: true,
         },
+        {
+          id: 'view:sketchColors',
+          label: '状态配色',
+          glyph: '◐',
+          action: { kind: 'toggle', value: 'sketchColors' },
+          enabled: true,
+        },
       ],
     },
   ];
@@ -435,6 +442,7 @@ export interface PieStore {
   toggleDims(): void;
   toggleConstraints(): void;
   toggleEndpoints(): void;
+  toggleSketchColors(): void;
   select(ids: Iterable<EntityId>): void;
   pushLog(text: string): void;
 }
@@ -492,6 +500,9 @@ export function runPieAction(action: PieAction, s: PieStore, world?: Vec2): void
           return;
         case 'endpoints':
           s.toggleEndpoints();
+          return;
+        case 'sketchColors':
+          s.toggleSketchColors();
           return;
       }
       return;

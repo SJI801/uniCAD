@@ -182,6 +182,61 @@ describe('0.3 自由度统计', () => {
   });
 });
 
+describe('0.3 草图颜色提示（欠定义蓝）', () => {
+  it('判定只认「缺尺寸 / 缺方位」——只剩平移不算（本版本没有锚点约束）', async () => {
+    const { isUnderDefined } = await import('./src/core/constraints');
+    const layer = S().doc.currentLayer;
+
+    // 刚画的圆：半径未定（size 自由）→ 欠定义
+    install([circle('c', 0, 0, 20, layer)]);
+    expect(isUnderDefined(report()!.freeModes.get('c'))).toBe(true);
+
+    // 写了半径尺寸：只剩平移 → **不再**染蓝（钉不掉位置是锚点的事，不是"没定义"）
+    S().setDimensionAction('c', 'radius', 20, (e) => ({ ...e, radius: 20 }) as Entity, 'r20');
+    expect(report()!.freeModes.get('c')).toBe(1 | 2);
+    expect(isUnderDefined(report()!.freeModes.get('c'))).toBe(false);
+
+    // 直线 + 水平：尺寸还没定 → 欠定义；再加长度 → 只差平移 → 不染
+    install([line('l', 0, 0, 50, 0, layer)]);
+    S().select(['l']);
+    S().addConstraintAction('horizontal');
+    expect(isUnderDefined(report()!.freeModes.get('l'))).toBe(true);
+    S().setDimensionAction('l', 'distance', 80, (e) => setLength(e, 80), 'len');
+    expect(isUnderDefined(report()!.freeModes.get('l'))).toBe(false);
+
+    // 没进报告的图元（undefined）不染
+    expect(isUnderDefined(undefined)).toBe(false);
+  });
+
+  it('颜色优先级：冲突 > 选中 > 悬停 > 欠定义 > 图层色', async () => {
+    const { resolveRenderStyle, UI_COLORS } = await import('./src/render/style');
+    const layer = S().doc.currentLayer;
+    install([circle('c', 0, 0, 20, layer)]);
+    const c = S().doc.entities[0]!;
+    const color = (st: Parameters<typeof resolveRenderStyle>[2]) =>
+      resolveRenderStyle(S().doc, c, st).color;
+
+    expect(color({ underDefined: true })).toBe(UI_COLORS.underDefined);
+    // 悬停 / 选中要盖住底色（用户此刻在指这一根）
+    expect(color({ underDefined: true, hovered: true })).toBe(UI_COLORS.hover);
+    expect(color({ underDefined: true, selected: true })).toBe(UI_COLORS.selected);
+    // 冲突仍然最显眼
+    expect(color({ underDefined: true, selected: true, conflicting: true })).toBe(UI_COLORS.conflict);
+    // 预览（未落盘的临时几何）不参与
+    expect(color({ underDefined: true, preview: true })).toBe(UI_COLORS.preview);
+    // 关掉开关时渲染层拿到的就是 false，颜色回到图层色
+    expect(color({ underDefined: false })).not.toBe(UI_COLORS.underDefined);
+  });
+
+  it('开关存在且默认关（不擅自覆盖图层颜色）', () => {
+    expect(S().sketchColors).toBe(false);
+    S().toggleSketchColors();
+    expect(S().sketchColors).toBe(true);
+    S().toggleSketchColors();
+    expect(S().sketchColors).toBe(false);
+  });
+});
+
 describe('0.3 方向：欠约束的动作标记', () => {
   const ctx = {
     scale: 2,
