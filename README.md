@@ -841,6 +841,8 @@ uniCAD/
 │  ├─ vite-env.d.ts         环境与 wasm 胶水层类型声明
 │  └─ main.tsx              React 入口
 ├─ .cargo/config.toml       host 工具链链接器配置
+├─ ROADMAP.md               路线清单（阶段 0 已完成，1–4 待做）
+├─ PHASE1_PLAN.md           阶段 1（特征树）拆解：工作包 · 落地顺序 · 风险（计划，未执行）
 ├─ _probe_*.test.ts         进程内探针（真 store + 真 wasm，61 用例）
 ├─ _vitest.probe.config.mjs 探针用的 vitest 配置（include 白名单）
 ├─ vite.config.ts
