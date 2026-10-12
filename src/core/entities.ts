@@ -243,6 +243,39 @@ export function geometryEquals(a: Entity, b: Entity): boolean {
   return JSON.stringify(strip(a)) === JSON.stringify(strip(b));
 }
 
+/**
+ * Keys that describe **how** an entity looks, not **where** it is.
+ *
+ * `geometryEquals` answers "is this record byte-identical apart from its id?",
+ * which is the right question for skipping no-op undo entries. The 0.4 geometry
+ * lock (see `refusesGeometryEdit` in `editorStore`) needs a narrower one:
+ * recolouring a locked curve, or moving it to another layer, must stay allowed —
+ * only its *shape* is frozen. The two functions differ by exactly this list.
+ */
+const APPEARANCE_KEYS = [
+  'id',
+  'layer',
+  'color',
+  'lineStyle',
+  'lineWeight',
+  'plane',
+  'name',
+] as const;
+
+/**
+ * Shape-and-position equality: everything `geometryEquals` compares except the
+ * appearance keys above.
+ */
+export function shapeEquals(a: Entity, b: Entity): boolean {
+  if (a.type !== b.type) return false;
+  const strip = (e: Entity): string => {
+    const o = { ...(e as unknown as Record<string, unknown>) };
+    for (const k of APPEARANCE_KEYS) delete o[k];
+    return JSON.stringify(o);
+  };
+  return strip(a) === strip(b);
+}
+
 // ---------------------------------------------------------------------------
 // Bounds
 // ---------------------------------------------------------------------------

@@ -41,7 +41,12 @@ import {
   UNARY_CONSTRAINTS,
   XY_PLANE,
 } from '../core/types';
-import { nextConstraintId, DIMENSIONAL_CONSTRAINTS, ZERO_VALUE_DIMENSIONS } from '../core/constraints';
+import {
+  nextConstraintId,
+  DIMENSIONAL_CONSTRAINTS,
+  SIGNED_DIMENSIONS,
+  ZERO_VALUE_DIMENSIONS,
+} from '../core/constraints';
 
 export const FILE_MAGIC = 'unicad';
 export const FILE_VERSION = 1;
@@ -216,18 +221,23 @@ function decodeConstraint(raw: unknown, existing: ReadonlySet<string>): Constrai
   // half-formed pair here would push the inconsistency into the solver, where
   // it would show up as a constraint that silently never applies.
   //
-  // 尺寸目标值只在尺寸约束上读，且必须是有限数；是否允许 0 由 kind 决定
-  // （距离三兄弟的 0 是「重合 / 对齐」，见 `ZERO_VALUE_DIMENSIONS`）。
+  // 尺寸目标值只在尺寸约束上读，且必须是有限数；是否允许 0 / 负数由 kind 决定
+  // （距离三兄弟的 0 是「重合 / 对齐」，见 `ZERO_VALUE_DIMENSIONS`；锚点钉的是
+  // 世界坐标，负半边世界都是合法的，见 `SIGNED_DIMENSIONS`）。
   // 以前这里一律要求 `> 0`，于是「两条竖直对齐的线 + 水平距离」这种种子值
   // 本来就是 0 的约束，存盘时写了 `v: 0`、读回来被整条丢掉。
   // 几何约束即使带着 v 键也忽略——宽容读入旧文件/手写文件。
   let value: number | undefined;
   if (DIMENSIONAL_CONSTRAINTS.has(kind as ConstraintKind)) {
     const raw = o['v'];
-    const mayBeZero = ZERO_VALUE_DIMENSIONS.has(kind as ConstraintKind);
-    if (typeof raw !== 'number' || !Number.isFinite(raw) || (mayBeZero ? raw < 0 : raw <= 0)) {
-      return null;
-    }
+    const ck = kind as ConstraintKind;
+    const signed = SIGNED_DIMENSIONS.has(ck);
+    const mayBeZero = ZERO_VALUE_DIMENSIONS.has(ck);
+    const usable =
+      typeof raw === 'number' &&
+      Number.isFinite(raw) &&
+      (signed || (mayBeZero ? raw >= 0 : raw > 0));
+    if (!usable) return null;
     value = raw;
   }
   if (UNARY_CONSTRAINTS.has(kind as ConstraintKind)) {

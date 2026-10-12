@@ -109,6 +109,18 @@ pub enum ConstraintKind {
     DistanceX,
     /// Vertical distance: |p.y − q.y| equals the target, x free.
     DistanceY,
+    /// 「锚点」的一半：被引用点的 **x 坐标**等于目标值。
+    ///
+    /// 为什么拆成两个种类而不是一个「固定」：约束在线上的载荷只有**一个**标量
+    /// （`value`），而钉住一个点要两个数。拆开之后它就是和 `Horizontal` / `Radius`
+    /// 完全同形的 unary 约束——**wire 格式一个字节都不用改**，前端在建「固定」时
+    /// 成对写两条即可（`buildConstraints`）。
+    ///
+    /// 有了它，「完全定义」（自由度 0）才第一次可达：没有锚点，整张图永远留着刚体
+    /// 平移（+转动）自由度，`dof` 到不了 0。
+    FixedX,
+    /// 「锚点」的另一半：被引用点的 **y 坐标**等于目标值。
+    FixedY,
 }
 
 impl ConstraintKind {
@@ -131,6 +143,9 @@ impl ConstraintKind {
             12 => Some(ConstraintKind::Diameter),
             13 => Some(ConstraintKind::DistanceX),
             14 => Some(ConstraintKind::DistanceY),
+            // 15/16 are the anchor pair (see [`ConstraintKind::FixedX`]).
+            15 => Some(ConstraintKind::FixedX),
+            16 => Some(ConstraintKind::FixedY),
             _ => None,
         }
     }
@@ -154,6 +169,8 @@ impl ConstraintKind {
                 | ConstraintKind::Diameter
                 | ConstraintKind::DistanceX
                 | ConstraintKind::DistanceY
+                | ConstraintKind::FixedX
+                | ConstraintKind::FixedY
         )
     }
 }
@@ -577,7 +594,11 @@ fn is_valid(prims: &[Prim], c: &Constraint) -> bool {
             return (matches!(c.kind, ConstraintKind::Horizontal | ConstraintKind::Vertical)
                 && line_of(pa).is_some())
                 || (matches!(c.kind, ConstraintKind::Radius | ConstraintKind::Diameter)
-                    && circle_like(pa).is_some());
+                    && circle_like(pa).is_some())
+                // 锚点钉的是**具名点**，所以只要能取出点就成立（直线端点、圆心、
+                // 圆弧端点、多段线顶点都可以）。
+                || (matches!(c.kind, ConstraintKind::FixedX | ConstraintKind::FixedY)
+                    && point_of(pa, c.a).is_some());
         }
     };
     if b.entity >= prims.len() {
@@ -619,7 +640,10 @@ fn is_valid(prims: &[Prim], c: &Constraint) -> bool {
         }
         // Unreachable: handled in the `b: None` arm above, but the match must
         // stay exhaustive.
-        ConstraintKind::Radius | ConstraintKind::Diameter => false,
+        ConstraintKind::Radius
+        | ConstraintKind::Diameter
+        | ConstraintKind::FixedX
+        | ConstraintKind::FixedY => false,
     }
 }
 
@@ -828,6 +852,17 @@ fn residuals_of(prims: &[Prim], c: &Constraint, br: Branch, out: &mut Vec<f64>) 
         },
         ConstraintKind::Diameter => match circle_like(pa) {
             Some((_, r)) => out.push(2.0 * r - c.value.max(MIN_SIZE)),
+            None => out.push(0.0),
+        },
+
+        // 锚点：把具名点的某个坐标钉在目标值上。已经是线性的，误差就是坐标差，
+        // 没有任何分支符号或长度缩放——"钉住"本身就是精确的。
+        ConstraintKind::FixedX | ConstraintKind::FixedY => match point_of(pa, c.a) {
+            Some(p) => out.push(if c.kind == ConstraintKind::FixedX {
+                p.x - c.value
+            } else {
+                p.y - c.value
+            }),
             None => out.push(0.0),
         },
     }
@@ -1877,6 +1912,116 @@ mod tests {
         match &out.prims[0] {
             Prim::Circle(cc) => assert!(cc.radius.is_finite(), "radius went non-finite"),
             _ => panic!("circle"),
+        }
+    }
+
+    // ----------------------------------------------------------------------
+    // 锚点（FixedX / FixedY）：ROADMAP 0.4 的地基。
+    //
+    // 在锚点出现之前，「完全定义」在数学上**不可能**：任何草图都留着整体平移
+    // （和转动）的自由度，dof 永远 ≥ 3。锚点把具名点的坐标钉死，dof 才第一次
+    // 能到 0，0.4 的「完全定义」开关才有意义。
+    // ----------------------------------------------------------------------
+
+    fn pin(e: usize, kind: ConstraintKind, point_kind: u8, value: f64) -> Constraint {
+        Constraint {
+            kind,
+            a: Target { entity: e, point_kind, point_index: 0 },
+            b: None,
+            value,
+        }
+    }
+
+    /// 线上的 4 条锚点把整条线钉死：dof 0、无多余、已解。
+    #[test]
+    fn anchor_pair_fully_defines_a_line() {
+        let line = || LineSeg::new(Vec2::new(10.0, 20.0), Vec2::new(60.0, 20.0));
+        let cs = [
+            pin(0, ConstraintKind::FixedX, PT_START, 10.0),
+            pin(0, ConstraintKind::FixedY, PT_START, 20.0),
+            pin(0, ConstraintKind::FixedX, PT_END, 60.0),
+            pin(0, ConstraintKind::FixedY, PT_END, 20.0),
+        ];
+        let r = analyze(&[Prim::Line(line())], &cs);
+        assert_eq!((r.dof, r.rank, r.rows, r.redundant), (0, 4, 4, 0), "完全定义");
+        assert!(r.solved && r.conflicts.is_empty());
+        assert_eq!(r.modes[0], 0, "nothing can move any more");
+    }
+
+    /// 「拖不动」的内核证明：几何被挪走之后，求解把它**精确**拉回锚点坐标。
+    #[test]
+    fn anchors_pull_a_dragged_line_back() {
+        let dragged = Prim::Line(LineSeg::new(Vec2::new(33.0, 44.0), Vec2::new(90.0, -5.0)));
+        let cs = [
+            pin(0, ConstraintKind::FixedX, PT_START, 10.0),
+            pin(0, ConstraintKind::FixedY, PT_START, 20.0),
+            pin(0, ConstraintKind::FixedX, PT_END, 60.0),
+            pin(0, ConstraintKind::FixedY, PT_END, 20.0),
+        ];
+        let out = solve(&[dragged], &[true], &cs);
+        assert!(out.converged, "max residual = {}", out.max_residual);
+        match &out.prims[0] {
+            Prim::Line(l) => {
+                assert!((l.a - Vec2::new(10.0, 20.0)).length() < 1e-6, "a = {:?}", l.a);
+                assert!((l.b - Vec2::new(60.0, 20.0)).length() < 1e-6, "b = {:?}", l.b);
+            }
+            _ => panic!("line"),
+        }
+    }
+
+    /// 锚点只钉**位置**：圆的圆心被钉住后，半径仍是自由的（1 个自由度），
+    /// 补一条半径尺寸才真正完全定义——锚点绝不会顺手改尺寸。
+    #[test]
+    fn anchor_pins_the_centre_but_not_the_radius() {
+        let circle = || Prim::Circle(Circle::new(Vec2::new(7.0, -3.0), 20.0));
+        let centre = [
+            pin(0, ConstraintKind::FixedX, PT_CENTER, 7.0),
+            pin(0, ConstraintKind::FixedY, PT_CENTER, -3.0),
+        ];
+        let r = analyze(&[circle()], &centre);
+        assert_eq!(r.dof, 1, "radius is still free");
+        assert_eq!(r.modes[0] & MODE_SIZE, MODE_SIZE);
+
+        let radius = Constraint {
+            kind: ConstraintKind::Radius,
+            a: Target::whole(0),
+            b: None,
+            value: 20.0,
+        };
+        let with_radius = [centre[0], centre[1], radius];
+        let r = analyze(&[circle()], &with_radius);
+        assert_eq!(r.dof, 0, "锚点 + 半径尺寸 = 完全定义");
+        assert!(r.solved && r.redundant == 0);
+    }
+
+    /// 锚点在线上是普通的一元尺寸：tag 往返、arity 1、算尺寸、能被求解驱动
+    /// （把坐标从 0 改到 40，几何跟着走）。
+    #[test]
+    fn anchor_is_a_plain_unary_dimension() {
+        assert_eq!(ConstraintKind::from_tag(15.0).map(|k| k as u8), Some(ConstraintKind::FixedX as u8));
+        assert_eq!(ConstraintKind::from_tag(16.0).map(|k| k as u8), Some(ConstraintKind::FixedY as u8));
+        assert!(ConstraintKind::FixedX.is_dimensional() && ConstraintKind::FixedY.is_dimensional());
+        assert_eq!((ConstraintKind::FixedX.arity(), ConstraintKind::FixedY.arity()), (1, 1));
+
+        // 改值即驱动：把「终点 x」这条锚点从 0 改成 40，端点跟着走到 40。
+        let cs = [
+            pin(0, ConstraintKind::FixedX, PT_START, 0.0),
+            pin(0, ConstraintKind::FixedY, PT_START, 0.0),
+            pin(0, ConstraintKind::FixedX, PT_END, 40.0),
+            pin(0, ConstraintKind::FixedY, PT_END, 0.0),
+        ];
+        let out = solve(
+            &[Prim::Line(LineSeg::new(Vec2::new(0.0, 0.0), Vec2::new(0.0, 0.0)))],
+            &[true],
+            &cs,
+        );
+        assert!(out.converged, "max residual = {}", out.max_residual);
+        match &out.prims[0] {
+            Prim::Line(l) => {
+                assert!((l.b.x - 40.0).abs() < 1e-6, "b = {:?}", l.b);
+                assert!((l.a.x).abs() < 1e-6, "start must stay put: {:?}", l.a);
+            }
+            _ => panic!("line"),
         }
     }
 }

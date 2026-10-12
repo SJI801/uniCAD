@@ -10,7 +10,7 @@ import LeftPanel from './LeftPanel';
 import RightPanel from './RightPanel';
 import StatusBar from './StatusBar';
 import { useShortcuts } from './shortcuts';
-import { useEditor } from '../state/editorStore';
+import { useEditor, commandRewritesGeometry, refusesGeometryEdit } from '../state/editorStore';
 import { TOOL_SPECS } from '../tools/registry';
 import type { Tool, ToolContext, PreviewGeometry } from '../tools/tools';
 import {
@@ -160,7 +160,15 @@ export default function Workbench(): React.ReactElement {
       doc: state.doc,
       currentLayer: () => useEditor.getState().doc.currentLayer,
       activePlane: () => useEditor.getState().doc.activePlane,
-      commit: (cmd) => state.run(cmd),
+      // 完全定义（ROADMAP 0.4）的几何锁也管工具：改写已有图元的命令（修剪、圆角
+      // 这类）是几何修改，拒绝；只新建或只删除的命令（直线、圆、矩形、Delete）
+      // 不动已有几何，保持可用。判据在 `commandRewritesGeometry` 里，与 store
+      // 侧同一条界线：锁的是形状，不是整张图。
+      commit: (cmd) => {
+        const state = useEditor.getState();
+        if (commandRewritesGeometry(cmd) && refusesGeometryEdit(state, `「${cmd.label}」`)) return;
+        useEditor.getState().run(cmd);
+      },
       setPrompt: (text) => useEditor.getState().setPrompt(text),
       requestClose: () => false,
       pick: (p) => pickEntityAt(p),

@@ -115,6 +115,10 @@ export const DIMENSION_KINDS: readonly ConstraintKind[] = [
   'angle',
   'radius',
   'diameter',
+  // 「固定」也在这里：它正是「点了就锁定现状」的极端形式——把每个具名点的
+  // 当前坐标写成锚点。放在尺寸而不是几何组，是因为它改的是**尺寸**（坐标值），
+  // 而且完全定义下它必须仍然可用（尺寸是锁唯一放行的东西）。
+  'fixedX',
 ];
 
 const toolSpec = (id: string) => TOOL_SPECS.find((t) => t.id === id);

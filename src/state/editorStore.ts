@@ -51,7 +51,7 @@ import {
 } from '../core/history';
 import { XY_PLANE, planeNormal } from '../core/types';
 import type { DocFrame, DocPlane, PlaneId } from '../core/types';
-import { cloneEntity, geometryEquals, isPickable, newLayerId, constraintPointAt, pinNamedPoint } from '../core/entities';
+import { cloneEntity, geometryEquals, isPickable, newLayerId, constraintPointAt, pinNamedPoint, shapeEquals } from '../core/entities';
 import { splitCommand, splitEntities, splitTargets } from '../core/split';
 import {
   CONSTRAINT_LABEL,
@@ -62,6 +62,7 @@ import {
   isSelfDimension,
   solveConstraints,
   DIMENSIONAL_CONSTRAINTS,
+  SIGNED_DIMENSIONS,
   ZERO_VALUE_DIMENSIONS,
   type ConstraintReport,
 } from '../core/constraints';
@@ -400,6 +401,56 @@ function defaultCursor(): CursorState {
   };
 }
 
+/**
+ * 「完全定义」= 几何锁 —— ROADMAP 0.4。
+ *
+ * 打开之后**只有尺寸能改几何**。返回 true 表示这次修改必须被丢掉，并且已经写了
+ * 一条人话日志解释为什么。
+ *
+ * 关卡为什么在 store 而不是画布上：0.4 的验收句是「只允许改尺寸」，而能改几何的
+ * 入口不止拖动一个 —— 属性面板的数字框、旋转/缩放/对齐、修剪分割，每一个都直接
+ * 写几何。只拦拖动的话，用户在属性面板里照样能把刚锁住的线改走，那这句话就是空
+ * 的。这些入口共用 store 的少数几个方法，把关卡放在那里才是「只允许」。
+ *
+ * 两种例外：
+ *
+ * * **尺寸路径**（`setDimensionAction` / `setConstraintValueAction` / 尺寸约束）
+ *   一律放行 —— 它们就是这句话里允许的那一半。
+ * * **预览与回滚**（标签以 `__` 开头）一律放行：那是拖动的中间态，拦下来会让
+ *   画布永远停在预览位置。
+ */
+const LIVE_LABEL_PREFIX = '__';
+
+export function refusesGeometryEdit(state: EditorState, what: string, label?: string): boolean {
+  if (label !== undefined && label.startsWith(LIVE_LABEL_PREFIX)) return false;
+  if (!state.fullyConstrained) return false;
+  state.pushLog(`完全定义：${what}会改几何，已锁定 —— 请用尺寸驱动`);
+  return true;
+}
+
+/**
+ * 工具提交的命令会不会**改写已有几何**？—— 0.4 的锁要能管住绘图工具。
+ *
+ * 两种形状算改写：
+ *
+ * * `update` 且 `shapeEquals` 说形状真的变了（圆角、拉伸这类改图元）；
+ * * **同时**删掉旧图元又新建图元 —— 修剪就是「删掉原曲线 + 加回两段」，补丁形状
+ *   上看是删除 + 新建，但它显然改了已有几何。只看 `update` 会漏掉它。
+ *
+ * 只新建（直线/圆/矩形/偏置）或只删除（Delete 键）都不动已有几何，放行：
+ * 锁的是**形状**，不是整张图 —— 锁上之后连画都画不了，用户会以为程序坏了。
+ */
+export function commandRewritesGeometry(cmd: { patches: readonly Patch[] }): boolean {
+  let removed = false;
+  let added = false;
+  for (const p of cmd.patches) {
+    if (p.op === 'update' && !shapeEquals(p.before, p.after)) return true;
+    if (p.op === 'remove') removed = true;
+    if (p.op === 'add') added = true;
+  }
+  return removed && added;
+}
+
 export const useEditor = create<EditorState>((set, get) => ({
   doc: createEmptyDocument(),
   view: { scale: 1, center: { x: 0, y: 0 }, width: 800, height: 600, dpr: 1 },
@@ -583,6 +634,13 @@ export const useEditor = create<EditorState>((set, get) => ({
       get().pushLog('所选对象位于锁定图层，无法修改');
       return;
     }
+    // 完全定义：先算出来再判「这次变换到底动不动几何」。只比几何（`shapeEquals`），
+    // 所以锁住之后改颜色、换图层仍然照做——锁的是形状，不是整条记录。
+    const moved = edits.some((after) => {
+      const before = doc.entities.find((e) => e.id === after.id);
+      return before !== undefined && !shapeEquals(before, after);
+    });
+    if (moved && refusesGeometryEdit(get(), '变换', label)) return;
     // 被拖动/变换的对象就是可以动的对象：约束靠调整**它们**来维持，
     // 伙伴留在原地。这样拖一条相切的直线时，圆的圆心不会跟着跑。
     const patches = withConstraintRepair(doc, edits, [...selection], label);
@@ -595,6 +653,10 @@ export const useEditor = create<EditorState>((set, get) => ({
     const before = doc.entities.find((e) => e.id === id);
     if (!before) return;
     const after = fn(before);
+
+    // 完全定义：属性面板里改几何（坐标、半径、顶点…）要拦，改外观（图层、颜色、
+    // 线型、名称）不拦。同一个入口，两种修改，所以按「几何是否真的变了」判。
+    if (!shapeEquals(before, after) && refusesGeometryEdit(get(), '改几何', label)) return;
 
     // 改属性时**只放开伙伴**。把被编辑对象也放开，求解器会用「把半径改回去」
     // 来满足相切 —— 用户刚做的修改当场被撤销，看起来像输入框不生效。
@@ -681,6 +743,11 @@ export const useEditor = create<EditorState>((set, get) => ({
 
   addConstraintAction(kind) {
     const { doc, selection } = get();
+    // 完全定义：尺寸约束（含「固定」——它只是把现状钉住，不移动任何东西）照样能
+    // 加，因为 0.4 允许的正是尺寸；**几何关系**（相切/平行/水平…）会通过求解移动
+    // 几何，那就越过了这把锁。想加就先关掉「完全定义」。
+    const isDimension = DIMENSIONAL_CONSTRAINTS.has(kind);
+    if (!isDimension && refusesGeometryEdit(get(), `「${CONSTRAINT_LABEL[kind]}」约束`)) return;
     const entities = doc.entities.filter((e) => selection.has(e.id));
     const built = buildConstraints(kind, entities);
     if (!built.constraints || built.constraints.length === 0) {
@@ -720,10 +787,12 @@ export const useEditor = create<EditorState>((set, get) => ({
     const target = doc.constraints.find((c) => c.id === id);
     // 只有尺寸约束有「值」可改；几何关系（相切/平行…）直接忽略。
     if (!target || !DIMENSIONAL_CONSTRAINTS.has(target.kind)) return;
-    // 距离三兄弟的 0 是「重合 / 对齐」，是合法目标值；半径/角度才必须为正。
+    // 距离三兄弟的 0 是「重合 / 对齐」，是合法目标值；锚点钉的是世界坐标，负半边
+    // 世界也合法；半径/角度才必须为正。
     const mayBeZero = ZERO_VALUE_DIMENSIONS.has(target.kind);
-    if (!Number.isFinite(value) || (mayBeZero ? value < 0 : value <= 0)) {
-      get().pushLog(mayBeZero ? '尺寸不能为负数' : '尺寸必须大于 0');
+    const signed = SIGNED_DIMENSIONS.has(target.kind);
+    if (!Number.isFinite(value) || (!signed && (mayBeZero ? value < 0 : value <= 0))) {
+      get().pushLog(signed ? '坐标必须是有限数' : mayBeZero ? '尺寸不能为负数' : '尺寸必须大于 0');
       return;
     }
     if (Math.abs((target.value ?? 0) - value) < 1e-9) return;
@@ -786,6 +855,10 @@ export const useEditor = create<EditorState>((set, get) => ({
 
   splitAtIntersections() {
     const { doc, selection } = get();
+    // 分解把一条曲线换成两段：几何的**身份**变了（约束会被撤掉、端点重排），
+    // 属于「改几何」，完全定义下拒绝。删除/新建/复制不在这里拦——它们不动已有
+    // 几何，锁的是形状而不是整张图。
+    if (refusesGeometryEdit(get(), '交点分解')) return;
     const targets = splitTargets(doc, selection);
     if (targets.length === 0) {
       get().pushLog('没有可分解的对象（所选对象位于隐藏或锁定图层）');
@@ -1114,7 +1187,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     get().setSketchColors(on);
     get().pushLog(
       on
-        ? '约束状态配色: 开（蓝色 = 还缺尺寸或方位约束；只剩位置未定的不染——本版本没有锚点约束）'
+        ? '约束状态配色: 开（蓝色 = 还缺尺寸或方位约束；只是位置没定的不染——用「固定」钉住即可）'
         : '约束状态配色: 关',
     );
   },
@@ -1127,7 +1200,22 @@ export const useEditor = create<EditorState>((set, get) => ({
   toggleFullyConstrained() {
     const visible = !get().fullyConstrained;
     get().setFullyConstrained(visible);
-    get().pushLog(visible ? '完全定义: 开（草图已锁定，改尺寸驱动）' : '完全定义: 关');
+    if (!visible) {
+      get().pushLog('完全定义: 关（几何恢复可编辑）');
+      return;
+    }
+    // 锁是手动的开关，跟自由度无关：草图真到没到 0 由状态芯片说。但一句「开」
+    // 不足以让人知道改不动东西是**故意的**，所以把剩下多少自由度、怎么改也一起说。
+    const report = get().constraintReport;
+    const dof = report?.dof ?? null;
+    get().pushLog(
+      '完全定义: 开（几何已锁定，只能通过尺寸约束驱动）' +
+        (dof === null
+          ? ''
+          : dof > 0
+            ? ` · 注意草图还有 ${dof} 个自由度，锁只是禁止拖动，不会把它变少`
+            : ' · 草图自由度已为 0'),
+    );
   },
 
   setRibbonCollapsed(collapsed) {

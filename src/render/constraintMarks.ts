@@ -20,9 +20,14 @@
  *    to something the eye can follow.
  */
 
-import type { CadDocument, Constraint, Entity, EntityId, Vec2 } from '../core/types';
-import { constraintPointAt, entityBoundsTS } from '../core/entities';
-import { CONSTRAINT_GLYPH, describeConstraint, isSelfDimension } from '../core/constraints';
+import type { CadDocument, Constraint, ConstraintKind, Entity, EntityId, Vec2 } from '../core/types';
+import { constraintPointAt, describeEntity, entityBoundsTS } from '../core/entities';
+import {
+  CONSTRAINT_GLYPH,
+  POINT_LABEL,
+  describeConstraint,
+  isSelfDimension,
+} from '../core/constraints';
 import type { DimContext, DimLabel } from './dims';
 import type { OverlaySegment } from './overlay';
 import { UI_COLORS } from './style';
@@ -88,8 +93,17 @@ export function constraintBadges(
   const onVisibleLayer = new Set(visible.map((e) => e.id));
   const labels: DimLabel[] = [];
 
+  // 锚点先单独收拢：一条「固定」会在每个具名点上落下**两条**约束（x 一条、y 一条），
+  // 逐条画就是每根线四个 X/Y 角标。同一个点的一对合并成一枚「锁定」徽章，
+  // 悬停里带坐标，值在右栏约束列表改。
+  for (const badge of anchorBadges(doc, selected, onVisibleLayer, ctx)) {
+    if (labels.length >= MAX_BADGES) break;
+    labels.push(badge);
+  }
+
   for (const c of doc.constraints) {
     if (labels.length >= MAX_BADGES) break;
+    if (ANCHOR_KINDS.has(c.kind)) continue;
     const touches = selected.has(c.a.entity) || (c.b !== undefined && selected.has(c.b.entity));
     if (!touches) continue;
     // A badge pointing at something hidden is worse than no badge: the user
@@ -117,6 +131,70 @@ export function constraintBadges(
     });
   }
   return labels;
+}
+
+/** 锚点族（见 `constraintMarks` 顶部的说明）。 */
+const ANCHOR_KINDS: ReadonlySet<ConstraintKind> = new Set<ConstraintKind>(['fixedX', 'fixedY']);
+
+/**
+ * One 「锁定」 badge per anchored named point, with both coordinates in the
+ * tooltip. Screen-space labels, like the rest of this module.
+ */
+function anchorBadges(
+  doc: CadDocument,
+  selected: ReadonlySet<EntityId>,
+  onVisibleLayer: ReadonlySet<EntityId>,
+  ctx: DimContext,
+): DimLabel[] {
+  const groups = new Map<
+    string,
+    { entity: Entity; point: string; index: number; at: Vec2; xs: number[]; ys: number[] }
+  >();
+
+  for (const c of doc.constraints) {
+    if (!ANCHOR_KINDS.has(c.kind)) continue;
+    if (!selected.has(c.a.entity) || !onVisibleLayer.has(c.a.entity)) continue;
+    const e = doc.entities.find((x) => x.id === c.a.entity);
+    if (!e) continue;
+    const index = c.a.index ?? 0;
+    const at = constraintPointAt(e, c.a.point, index);
+    if (!at) continue;
+    const key = `${c.a.entity}|${c.a.point}|${index}`;
+    const g = groups.get(key) ?? { entity: e, point: c.a.point, index, at, xs: [], ys: [] };
+    if (c.kind === 'fixedX') g.xs.push(c.value ?? 0);
+    else g.ys.push(c.value ?? 0);
+    groups.set(key, g);
+  }
+
+  const out: DimLabel[] = [];
+  for (const g of groups.values()) {
+    const s = ctx.screenOf(g.at);
+    if (!Number.isFinite(s.x) || !Number.isFinite(s.y)) continue;
+    if (s.x < -40 || s.y < -40 || s.x > ctx.viewWidth + 40 || s.y > ctx.viewHeight + 40) continue;
+    out.push({
+      x: s.x + BADGE_OFFSET,
+      y: s.y - BADGE_OFFSET,
+      text: '锁定',
+      kind: 'constraint',
+      title: anchorTitle(g),
+    });
+  }
+  return out;
+}
+
+/** 「锁定」徽章的悬停说明：哪一端、钉在哪个坐标、去哪儿改。 */
+function anchorTitle(g: { entity: Entity; point: string; index: number; xs: number[]; ys: number[] }): string {
+  const where =
+    g.point === 'vertex'
+      ? `${describeEntity(g.entity)}·顶点${g.index + 1}`
+      : `${describeEntity(g.entity)}·${POINT_LABEL[g.point as keyof typeof POINT_LABEL] ?? ''}`;
+  const coords = [
+    g.xs.length > 0 ? `x = ${Number((g.xs[0] ?? 0).toFixed(3))}` : '',
+    g.ys.length > 0 ? `y = ${Number((g.ys[0] ?? 0).toFixed(3))}` : '',
+  ]
+    .filter((s) => s !== '')
+    .join(', ');
+  return `${where} 已固定（锚点 ${coords}）：拖动不会移动它。改值请到右栏约束列表，或删掉锚点。`;
 }
 
 /** 尺寸约束的徽章带值；几何关系只有字符。 */

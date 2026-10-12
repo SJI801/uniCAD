@@ -81,6 +81,12 @@ export const CONSTRAINT_LABEL: Record<ConstraintKind, string> = {
   diameter: '直径',
   distanceX: '水平距离',
   distanceY: '竖直距离',
+  // 「固定」是**动作**名：菜单里点它 = 把该图元的每个具名点都钉在当前位置
+  // （见 `buildConstraints`）。落盘之后它拆成一堆只钉 x 的 `fixedX` 和只钉 y 的
+  // `fixedY`，因为内核一条约束只能带一个标量。列表里 x 行读作「固定 = 10」、
+  // y 行读作「固定Y = 0」，成对出现正好读成「固定 x=10, y=0」。
+  fixedX: '固定',
+  fixedY: '固定Y',
 };
 
 /**
@@ -107,6 +113,11 @@ export const CONSTRAINT_GLYPH: Record<ConstraintKind, string> = {
   diameter: 'Ø',
   distanceX: 'H',
   distanceY: 'V',
+  // 锚点徽章不用单个字符：一个「固定」会落下 4 条约束，逐条画会在一根线上糊出
+  // 四个 X/Y 角标。`constraintBadges` 把同一个具名点上的一对合并成一枚
+  // 「锁定」徽章，这两个字符只作为兜底（例如只有 x 被钉住时）。
+  fixedX: 'X',
+  fixedY: 'Y',
 };
 
 /** Menu order: the ones people reach for first. */
@@ -126,6 +137,10 @@ export const CONSTRAINT_ORDER: readonly ConstraintKind[] = [
   'diameter',
   'distanceX',
   'distanceY',
+  // 「固定」排在最后：它不改变曲线之间的关系，而是给整张草图**接地**——
+  // 用户通常是先画完、标完尺寸，最后才发现还差几个自由度（0.3 的状态芯片），
+  // 这时才会来找它。它是 `UNARY_CONSTRAINTS` 里唯一一个能作用于任意图元的。
+  'fixedX',
 ];
 
 /**
@@ -140,6 +155,8 @@ export const DIMENSIONAL_CONSTRAINTS: ReadonlySet<ConstraintKind> = new Set<Cons
   'diameter',
   'distanceX',
   'distanceY',
+  'fixedX',
+  'fixedY',
 ]);
 
 /**
@@ -160,6 +177,24 @@ export const ZERO_VALUE_DIMENSIONS: ReadonlySet<ConstraintKind> = new Set<Constr
   'distance',
   'distanceX',
   'distanceY',
+  // 锚点钉的是**坐标**，x = 0 / y = 0 是最常见的一种（钉在世界原点上）。
+  'fixedX',
+  'fixedY',
+]);
+
+/**
+ * Dimensional kinds whose target **may be negative**.
+ *
+ * Only the anchors: every other dimension is a magnitude (a length, a radius,
+ * an angle) or a signed *gap* whose sign is carried by the frozen branch rather
+ * than by the stored number — `distanceX` between two points always stores a
+ * positive gap. An anchor stores a raw world coordinate, and half the world is
+ * on the negative side of zero, so `x = −30` has to survive the JSON reader, the
+ * panel's number box and `setConstraintValueAction`.
+ */
+export const SIGNED_DIMENSIONS: ReadonlySet<ConstraintKind> = new Set<ConstraintKind>([
+  'fixedX',
+  'fixedY',
 ]);
 
 export const POINT_LABEL: Record<ConstraintPointKind, string> = {
@@ -231,6 +266,16 @@ export function canApply(kind: ConstraintKind, entities: readonly Entity[]): App
     }
     if (!isCircular(entities[0]!)) {
       return { ok: false, reason: `${CONSTRAINT_LABEL[kind]}只能作用于圆或圆弧（当前选中含${describeEntity(entities[0]!)}）` };
+    }
+    return { ok: true };
+  }
+
+  // 固定（锚点）：作用于**任意**单个图元——它钉的是具名点的坐标，所以直线、
+  // 圆/弧、椭圆、多段线都有资格。必须排在只认直线的 unary 分支**之前**，否则
+  // 圆和多段线会被判成「只能作用于直线」。
+  if (kind === 'fixedX' || kind === 'fixedY') {
+    if (n !== 1) {
+      return { ok: false, reason: `${CONSTRAINT_LABEL[kind]}需要正好选中 1 个对象（当前 ${n} 个）` };
     }
     return { ok: true };
   }
@@ -419,6 +464,25 @@ export function buildConstraints(kind: ConstraintKind, entities: readonly Entity
         },
       ],
     };
+  }
+
+  // 固定（锚点）：把该图元的**每一个具名点**都钉在当前位置。
+  //
+  // 「固定一条线」在用户心里就是「这根线别动了」，所以它必须一次钉住两端：只钉
+  // 起点的话，线还能绕起点转，自由度不为 0，0.4 的「完全定义」就还是个空话。
+  // 一条线段 ⇒ 4 条约束（两端点各 x/y），多段线 ⇒ 每个顶点 2 条，圆/椭圆 ⇒
+  // 圆心 2 条（半径是**尺寸**，得另外用半径/直径约束驱动 —— 锚点永远不碰尺寸，
+  // 这是内核 `size_driven` 的规矩）。
+  if (kind === 'fixedX' || kind === 'fixedY') {
+    const e = entities[0]!;
+    const pts = namedPointsOf(e);
+    if (pts.length === 0) return { reason: '这个对象上没有可命名的点' };
+    const out: Constraint[] = [];
+    for (const p of pts) {
+      out.push({ id: nextConstraintId(), kind: 'fixedX', a: target(e.id, p), value: p.at.x });
+      out.push({ id: nextConstraintId(), kind: 'fixedY', a: target(e.id, p), value: p.at.y });
+    }
+    return { constraints: out };
   }
 
   if (UNARY_CONSTRAINTS.has(kind)) {

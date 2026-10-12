@@ -131,7 +131,17 @@ export type ConstraintKind =
   | 'radius'
   | 'diameter'
   | 'distanceX'
-  | 'distanceY';
+  | 'distanceY'
+  /**
+   * 锚点：把具名点的 **x** 坐标钉在 `value` 上。`fixedY` 同理钉 y。
+   *
+   * 内核里一条约束只能带一个标量，而钉住一个点要两个数，所以「固定」在线上
+   * 是**成对**的两条（见 `buildConstraints`）。有了它，自由度才第一次能到 0，
+   * ROADMAP 0.4 的「完全定义」开关才有意义 —— 没有锚点时整张图永远留着刚体
+   * 平移/转动自由度。
+   */
+  | 'fixedX'
+  | 'fixedY';
 
 /** Which point of a curve a constraint refers to. `none` = the whole curve. */
 export type ConstraintPointKind = 'none' | 'start' | 'end' | 'center' | 'vertex';
@@ -187,6 +197,9 @@ export const CONSTRAINT_KIND_TAG: Record<ConstraintKind, number> = {
   diameter: 12,
   distanceX: 13,
   distanceY: 14,
+  // 15/16 = 锚点对，与 `ConstraintKind::from_tag` 一一对应。
+  fixedX: 15,
+  fixedY: 16,
 };
 
 /** Kernel wire tags for `ConstraintTarget.point`. */
@@ -207,13 +220,17 @@ export const CONSTRAINT_STRIDE = 8;
 
 /**
  * Constraint kinds that only need one curve. Radius / diameter pin a single
- * circle or arc; horizontal / vertical pin a single line.
+ * circle or arc; horizontal / vertical pin a single line; fixedX / fixedY pin a
+ * single named point on *any* kind of curve (a line's endpoint, a circle's
+ * centre, a polyline's vertex).
  */
 export const UNARY_CONSTRAINTS: ReadonlySet<ConstraintKind> = new Set<ConstraintKind>([
   'horizontal',
   'vertical',
   'radius',
   'diameter',
+  'fixedX',
+  'fixedY',
 ]);
 
 // ---------------------------------------------------------------------------
