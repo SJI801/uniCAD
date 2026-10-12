@@ -1293,7 +1293,23 @@ body {
   padding: 3px 8px;
   font-size: 10.5px;
   overflow-x: auto;
+  /* 这一行的高度**必须恒定**，否则整块画布会跟着它跳。
+     实测的因果链（浏览器里量过）：chip 文字只比状态栏宽 4px（scrollWidth 916 /
+     clientWidth 912，坐标读数每帧都在变宽变窄）→ 横向滚动条出现 → 状态栏高度
+     27 → 37 → 它是 .canvas-host 的 flex 兄弟 → 画布高 508 → 498.1 → ResizeObserver
+     → `canvas.width/height` 重新赋值 = **WebGL 表面重建并清屏**。用户看到的就是
+     「画布频繁闪 + 画面整体上下跳 10px」。
+     状态栏是一行 chip，滚动条在这里没有价值：纵向永不滚，横向滚动条藏掉，
+     高度就再也不会被内容宽度牵动。 */
+  overflow-y: hidden;
+  scrollbar-width: none; /* Firefox */
+  /* chip 永不换行：一旦折行，状态栏就从一行变两行，画布跟着缩一次（同一条因果链）。 */
   white-space: nowrap;
+}
+
+.status-bar::-webkit-scrollbar {
+  height: 0;
+  width: 0;
 }
 
 .status-chip {
