@@ -26,6 +26,7 @@ import {
   type DimLabel,
 } from '../render/dims';
 import { constraintBadges, constraintGuides } from '../render/constraintMarks';
+import { dofMarkers } from '../render/dofMarks';
 import { useEditor } from '../state/editorStore';
 import {
   SceneBuffer,
@@ -1004,7 +1005,12 @@ export default function CanvasView(): React.ReactElement {
       const styles: Array<RenderStyle | null> = visible.map((e: Entity) => {
         const st = state.selection.has(e.id);
         const hv = state.hover === e.id;
-        return resolveRenderStyle(d, e, { selected: st, hovered: hv });
+        return resolveRenderStyle(d, e, {
+          selected: st,
+          hovered: hv,
+          // 冲突图元画警示红（0.3）：约束互相矛盾时，先让人看见是哪几条曲线。
+          conflicting: state.constraintReport?.conflictingEntities.has(e.id) ?? false,
+        });
       });
 
       renderer.buildLineBatch(tess.vertices, tess.strips, styles, pxPerModel);
@@ -1101,6 +1107,19 @@ export default function CanvasView(): React.ReactElement {
         // 距离类约束的解空间引导：选中时画出点被钉住的圆/轴线。
         overlaySegs.push(...constraintGuides(d, state.selection, visible));
         dimLabels.push(...constraintBadges(d, state.selection, visible, dimCtx));
+        // 欠约束方向（0.3）：选中图元还能往哪动——十字箭头=可平移，⟳=可转，
+        // ⤢=尺寸未定。与徽章同一规矩：只画选中的、可见的。
+        if (state.constraintReport) {
+          const marks = dofMarkers(
+            visible,
+            state.selection,
+            state.constraintReport.freeModes,
+            visible,
+            dimCtx,
+          );
+          overlaySegs.push(...marks.segments);
+          dimLabels.push(...marks.labels);
+        }
       }
       syncDimLayer(dimLayerRef.current, dimLabels);
 

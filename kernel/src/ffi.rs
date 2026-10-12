@@ -1160,6 +1160,44 @@ pub fn solve_constraints(
     result
 }
 
+/// 草图自由度报告（ROADMAP 0.3）—— 欠约束 / 完全定义 / 多余 / 冲突。
+///
+/// Input is the same triple as [`solve_constraints`] **minus `moving`**: 「这条
+/// 草图还剩多少自由度」与哪次拖动无关，所以内核一律按「全部图元都可动」分析。
+///
+/// Output, flat:
+/// `[dof, rank, rows, redundant, maxResidual, solved, conflictCount, ...conflictIndices,
+///   modeCount, ...modeFlags]`
+///
+/// `conflictIndices` 指向**传入的** `constraints` 数组（每条 8 个数），所以前端
+/// 可以直接拿它回指 `doc.constraints` 里的原对象去点名。`modeFlags` 与传入的图元
+/// 同序，位掩码见 [`crate::constraints::MODE_TX`] 等——它是「方向」那一半。
+///
+/// An **empty** return means the scene did not decode — the caller shows nothing
+/// rather than inventing a zero-degrees-of-freedom sketch.
+#[wasm_bindgen]
+pub fn analyze_constraints(encoded: &[f64], counts: &[u32], constraints: &[f64]) -> Vec<f64> {
+    let prims = decode_all(encoded, counts);
+    if prims.len() != counts.len() {
+        return Vec::new();
+    }
+    let cs = decode_constraints(constraints);
+    let out = crate::constraints::analyze(&prims, &cs);
+
+    let mut result = Vec::with_capacity(9 + out.conflicts.len() + out.modes.len());
+    result.push(out.dof as f64);
+    result.push(out.rank as f64);
+    result.push(out.rows as f64);
+    result.push(out.redundant as f64);
+    result.push(out.max_residual);
+    result.push(if out.solved { 1.0 } else { 0.0 });
+    result.push(out.conflicts.len() as f64);
+    result.extend(out.conflicts.iter().map(|i| *i as f64));
+    result.push(out.modes.len() as f64);
+    result.extend(out.modes.iter().map(|m| *m as f64));
+    result
+}
+
 // ---------------------------------------------------------------------------
 // Extrusion (3D)
 // ---------------------------------------------------------------------------

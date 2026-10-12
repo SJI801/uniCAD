@@ -55,6 +55,7 @@ import { cloneEntity, geometryEquals, isPickable, newLayerId, constraintPointAt,
 import { splitCommand, splitEntities, splitTargets } from '../core/split';
 import {
   CONSTRAINT_LABEL,
+  analyzeDocument,
   buildConstraints,
   buildEntityDimension,
   constraintsForEntity,
@@ -62,6 +63,7 @@ import {
   solveConstraints,
   DIMENSIONAL_CONSTRAINTS,
   ZERO_VALUE_DIMENSIONS,
+  type ConstraintReport,
 } from '../core/constraints';
 import { deserializeDocument, serializeDocument, type LoadResult } from '../io/json';
 
@@ -163,6 +165,12 @@ export interface EditorState {
    * 形状只能通过改尺寸驱动。默认关闭，不改变既有交互。
    */
   fullyConstrained: boolean;
+  /**
+   * 草图自由度报告（ROADMAP 0.3）：欠约束多少、是否完全定义、有没有冲突。
+   * `null` = 还没算（内核未就绪 / 没有约束 / 该 wasm 不支持）——此时界面不显示，
+   * 而不是显示 0（0 的含义是「完全定义」，不能拿来表示「不知道」）。
+   */
+  constraintReport: ConstraintReport | null;
   /**
    * Whether the top ribbon is folded down to a single compact row.
    *
@@ -406,6 +414,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   constraintsVisible: readUiFlag(CONSTRAINTS_VISIBLE_KEY, true),
   endpointsVisible: readUiFlag(ENDPOINTS_VISIBLE_KEY, true),
   fullyConstrained: readUiFlag(FULLY_CONSTRAINED_KEY, false),
+  constraintReport: null,
   ribbonCollapsed: readUiFlag(
     RIBBON_COLLAPSED_KEY,
     window.innerWidth < RIBBON_AUTO_COLLAPSE_BELOW,
@@ -425,6 +434,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       hover: null,
       dirty: false,
       history: historyInfo(history),
+      constraintReport: analyzeDocument(doc),
     });
   },
 
@@ -457,6 +467,9 @@ export const useEditor = create<EditorState>((set, get) => ({
       doc: { ...doc },
       history: historyInfo(history),
       dirty: true,
+      // 命令边界重算自由度报告。`__` 是实时预览（拖动每帧一次），那份开销不值得：
+      // 松手时那条真命令会算。报告因此可能在拖动中落后一帧——松手即准。
+      constraintReport: cmd.label.startsWith('__') ? get().constraintReport : analyzeDocument(doc),
     });
     const { selection, hover } = get();
     if (selection.size > 0 || hover) {
@@ -483,6 +496,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       dirty: true,
       selection: new Set([...get().selection].filter((id) => alive.has(id))),
       hover: get().hover && alive.has(get().hover!) ? get().hover : null,
+      constraintReport: analyzeDocument(doc),
     });
     get().pushLog(`已撤销: ${cmd.label}`);
   },
@@ -494,7 +508,12 @@ export const useEditor = create<EditorState>((set, get) => ({
       get().pushLog('没有可重做的操作');
       return;
     }
-    set({ doc: { ...doc }, history: historyInfo(history), dirty: true });
+    set({
+      doc: { ...doc },
+      history: historyInfo(history),
+      dirty: true,
+      constraintReport: analyzeDocument(doc),
+    });
     get().pushLog(`已重做: ${cmd.label}`);
   },
 
@@ -1195,7 +1214,9 @@ export const useEditor = create<EditorState>((set, get) => ({
     set({ kernelStatus: text });
   },
   setKernelReady(ready) {
-    set({ kernelReady: ready });
+    // 内核刚就绪时补算一次：文档可能在内核到位之前就建好了（示例图纸就是这样），
+    // 否则状态栏会一直空着等到用户下一次动文档。
+    set({ kernelReady: ready, constraintReport: analyzeDocument(get().doc) });
   },
 
   markSaved() {

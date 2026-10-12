@@ -841,6 +841,324 @@ fn residuals(prims: &[Prim], cs: &[Constraint], brs: &[Branch]) -> Vec<f64> {
     out
 }
 
+/// Central-difference Jacobian at `x`: `m` rows (one per residual) × `free.len()`
+/// columns (the variable slots named by `free`).
+///
+/// The step is relative to each variable's own magnitude, so a coordinate near
+/// 1e5 and an angle near 0 both get a useful difference. Hand-derived
+/// derivatives would be nine chances to get a sign wrong in a way that still
+/// converges most of the time; the systems here are tiny, so the extra
+/// evaluations cost nothing measurable.
+///
+/// Shared by the solver and by [`analyze`]: the two must agree on what the
+/// Jacobian is, or the degrees-of-freedom report would describe a different
+/// system than the one being solved. `x` is restored before returning.
+fn jacobian_at(
+    layout: &Layout,
+    prims: &[Prim],
+    cs: &[Constraint],
+    brs: &[Branch],
+    x: &mut [f64],
+    free: &[usize],
+    m: usize,
+    scratch: &mut Vec<Prim>,
+) -> Vec<f64> {
+    let nf = free.len();
+    let mut j = vec![0.0; m * nf];
+    for (col, &vi) in free.iter().enumerate() {
+        let h = 1e-6 * x[vi].abs().max(1.0);
+        let saved = x[vi];
+
+        x[vi] = saved + h;
+        layout.unpack_into(prims, x, scratch);
+        let rp = residuals(&scratch[..], cs, brs);
+        x[vi] = saved - h;
+        layout.unpack_into(prims, x, scratch);
+        let rm = residuals(&scratch[..], cs, brs);
+        x[vi] = saved;
+
+        let inv = 1.0 / (2.0 * h);
+        for row in 0..m {
+            j[row * nf + col] = (rp[row] - rm[row]) * inv;
+        }
+    }
+    j
+}
+
+/// Rank of a row-major `rows × cols` matrix, by Gaussian elimination with
+/// partial pivoting. `tol` is absolute — pass it scaled to the matrix (see the
+/// caller), because "is this pivot non-zero" is a question about significance,
+/// not about exact zeros.
+fn matrix_rank(a: &[f64], rows: usize, cols: usize, tol: f64) -> usize {
+    let mut m = a.to_vec();
+    let mut rank = 0usize;
+    for col in 0..cols {
+        if rank >= rows {
+            break;
+        }
+        let mut pivot_row = rank;
+        for r in (rank + 1)..rows {
+            if m[r * cols + col].abs() > m[pivot_row * cols + col].abs() {
+                pivot_row = r;
+            }
+        }
+        if m[pivot_row * cols + col].abs() <= tol {
+            continue;
+        }
+        if pivot_row != rank {
+            for c in 0..cols {
+                m.swap(rank * cols + c, pivot_row * cols + c);
+            }
+        }
+        let pivot = m[rank * cols + col];
+        for r in (rank + 1)..rows {
+            let f = m[r * cols + col] / pivot;
+            if f == 0.0 {
+                continue;
+            }
+            for c in col..cols {
+                m[r * cols + c] -= f * m[rank * cols + c];
+            }
+        }
+        rank += 1;
+    }
+    rank
+}
+
+// ---------------------------------------------------------------------------
+// Degrees-of-freedom report (ROADMAP 0.3)
+// ---------------------------------------------------------------------------
+
+/// 图元「还剩下的可读动作」位掩码（ROADMAP 0.3 的方向可视化）。
+///
+/// 一个动作是自由的，当且仅当它落在雅可比的**零空间**里（`J·m ≈ 0`）——这正是
+/// 「这个动作不会破坏任何一条已加的约束」的线性化说法。用固定的一组**人能读懂的
+/// 动作**去测，而不是把零空间基向量直接画出来：基是一组（随求解器任意选取的）
+/// 组合，画出来既不可读也不稳定；「能不能平移 / 转动 / 改尺寸」才是用户的问题。
+pub const MODE_TX: u8 = 1;
+pub const MODE_TY: u8 = 2;
+pub const MODE_ROT: u8 = 4;
+pub const MODE_SIZE: u8 = 8;
+
+/// 与 `write_params` 同序的参数方向：`(掩码, 向量)`。
+///
+/// 转动给三种可能的支点（质心 / 每个命名点）——两个首尾相接的直线，绕**接点**转
+/// 是允许的，绕各自质心转不是；只测质心会漏报真实自由度。任一为自由即置位。
+/// 圆没有自己的转动（绕圆心转不改变它），所以不报 ROT；圆弧的「转」= 摆动（两个
+/// 端点角同增），那是它真实的一个自由度。
+fn mode_vectors(p: &Prim) -> Vec<(u8, Vec<f64>)> {
+    match p {
+        Prim::Line(l) => {
+            let len = l.length();
+            let dir = l.dir();
+            let perp = Vec2::new(-dir.y, dir.x); // 单位法向
+            let mut v = Vec::with_capacity(6);
+            v.push((MODE_TX, vec![1.0, 0.0, 1.0, 0.0]));
+            v.push((MODE_TY, vec![0.0, 1.0, 0.0, 1.0]));
+            // 绕质心：两端反向
+            v.push((MODE_ROT, vec![-perp.x * len / 2.0, -perp.y * len / 2.0, perp.x * len / 2.0, perp.y * len / 2.0]));
+            // 绕两个端点
+            v.push((MODE_ROT, vec![0.0, 0.0, -perp.x * len, -perp.y * len]));
+            v.push((MODE_ROT, vec![perp.x * len, perp.y * len, 0.0, 0.0]));
+            // 定质心缩放 = 改长度
+            v.push((MODE_SIZE, vec![-dir.x * len / 2.0, -dir.y * len / 2.0, dir.x * len / 2.0, dir.y * len / 2.0]));
+            v
+        }
+        Prim::Circle(_) => vec![
+            (MODE_TX, vec![1.0, 0.0, 0.0]),
+            (MODE_TY, vec![0.0, 1.0, 0.0]),
+            (MODE_SIZE, vec![0.0, 0.0, 1.0]),
+        ],
+        Prim::Arc(_) => vec![
+            (MODE_TX, vec![1.0, 0.0, 0.0, 0.0, 0.0]),
+            (MODE_TY, vec![0.0, 1.0, 0.0, 0.0, 0.0]),
+            (MODE_SIZE, vec![0.0, 0.0, 1.0, 0.0, 0.0]),
+            // 摆动：两个端点角同增
+            (MODE_ROT, vec![0.0, 0.0, 0.0, 1.0, 1.0]),
+        ],
+        Prim::Ellipse(_) => vec![
+            (MODE_TX, vec![1.0, 0.0, 0.0, 0.0, 0.0]),
+            (MODE_TY, vec![0.0, 1.0, 0.0, 0.0, 0.0]),
+            (MODE_SIZE, vec![0.0, 0.0, 1.0, 1.0, 0.0]),
+            (MODE_ROT, vec![0.0, 0.0, 0.0, 0.0, 1.0]),
+        ],
+        Prim::Polyline(pl) => {
+            let n = pl.points.len();
+            let c = if n == 0 {
+                Vec2::new(0.0, 0.0)
+            } else {
+                let sum = pl.points.iter().fold(Vec2::new(0.0, 0.0), |a, p| a + *p);
+                Vec2::new(sum.x / n as f64, sum.y / n as f64)
+            };
+            let mut tx = vec![0.0; n * 2];
+            let mut ty = vec![0.0; n * 2];
+            let mut rot = vec![0.0; n * 2];
+            let mut size = vec![0.0; n * 2];
+            for (i, pt) in pl.points.iter().enumerate() {
+                let d = *pt - c;
+                tx[i * 2] = 1.0;
+                ty[i * 2 + 1] = 1.0;
+                rot[i * 2] = -d.y;
+                rot[i * 2 + 1] = d.x;
+                size[i * 2] = d.x;
+                size[i * 2 + 1] = d.y;
+            }
+            vec![
+                (MODE_TX, tx),
+                (MODE_TY, ty),
+                (MODE_ROT, rot),
+                (MODE_SIZE, size),
+            ]
+        }
+    }
+}
+
+/// How much freedom a sketch still has, and what cannot be satisfied.
+pub struct Report {
+    /// Remaining degrees of freedom — the null-space dimension of the Jacobian.
+    /// `0` means 完全定义. Note that nothing in this kernel is *grounded*, so
+    /// every sketch keeps at least its rigid-body freedom (two translations, and
+    /// a rotation unless 水平/竖直 pins it).
+    pub dof: usize,
+    /// Rank of the Jacobian.
+    pub rank: usize,
+    /// Scalar residual rows (`Σ arity`).
+    pub rows: usize,
+    /// `rows - rank`: constraints that add nothing new. Consistent ones are
+    /// merely **redundant** (a hint), unlike [`Report::conflicts`].
+    pub redundant: usize,
+    /// Indices into the **input** constraint list of the ones that cannot hold
+    /// at the same time — the honest answer to 「冲突项是谁」. Indices refer to
+    /// `raw` as passed in (constraints this kernel cannot evaluate are skipped,
+    /// but they do not shift the numbering the caller sees).
+    pub conflicts: Vec<usize>,
+    /// Largest absolute residual left, in model units.
+    pub max_residual: f64,
+    /// Whether every constraint ended up satisfied.
+    pub solved: bool,
+    /// 每个图元剩下的**可读动作**，与传入的 `prims` 同序（位掩码见 `MODE_*`）。
+    /// 这是「方向」那一半：dof 告诉你还差几个，这里告诉你还能往哪动。
+    pub modes: Vec<u8>,
+}
+
+/// A residual bigger than this counts as "cannot be satisfied". Scaled by the
+/// drawing's extent so the same number means the same thing in millimetres and
+/// in metres.
+fn report_tol(prims: &[Prim]) -> f64 {
+    let mut b = Aabb::empty();
+    for p in prims {
+        b.merge(p.bounds());
+    }
+    let extent = if b.is_empty() {
+        1.0
+    } else {
+        (b.max_x - b.min_x).abs().max((b.max_y - b.min_y).abs()).max(1.0)
+    };
+    1e-7 * extent
+}
+
+/// Analyze a sketch: solve it, then count what is left over.
+///
+/// Two things this deliberately does *not* reuse from [`solve`]:
+///
+/// * **Every primitive is movable.** 「这条草图还剩多少自由度」 is a property of
+///   the sketch, not of whichever drag happened to call the solver.
+/// * **Every parameter is a column**, including a radius that no dimension
+///   drives. [`solve`] freezes those (a relationship must not resize a curve —
+///   see `size_driven`), but an undimensioned radius is still an *unsolved*
+///   degree of freedom, and hiding it would make the count lie.
+pub fn analyze(prims: &[Prim], raw: &[Constraint]) -> Report {
+    // 过滤掉这个内核算不了的约束，但**记住它们在原始列表里的位置**：调用方要拿
+    // 序号回指自己那份 `doc.constraints`，跳过的条目不能让后面的序号移位。
+    let mut filtered: Vec<Constraint> = Vec::new();
+    let mut origin: Vec<usize> = Vec::new();
+    for (i, c) in raw.iter().enumerate() {
+        if is_valid(prims, c) {
+            filtered.push(*c);
+            origin.push(i);
+        }
+    }
+    let layout = Layout::new(prims);
+    let branches: Vec<Branch> = filtered.iter().map(|c| plan_branch(prims, c)).collect();
+    let rows: usize = filtered.iter().map(|c| c.kind.arity()).sum();
+
+    // Solve first: a residual has to be measured at the configuration the solver
+    // can actually reach, otherwise a perfectly satisfiable constraint looks
+    // like a conflict merely because it started far away.
+    let out = solve(prims, &vec![true; prims.len()], &filtered);
+
+    let free: Vec<usize> = (0..prims.len()).flat_map(|i| layout.block(i)).collect();
+    let mut x = layout.pack(&out.prims);
+    let mut scratch = Vec::with_capacity(prims.len());
+    let j = jacobian_at(&layout, &out.prims, &filtered, &branches, &mut x, &free, rows, &mut scratch);
+
+    let biggest = j.iter().fold(0.0_f64, |a, v| a.max(v.abs())).max(1.0);
+    let rank = if rows == 0 || free.is_empty() {
+        0
+    } else {
+        matrix_rank(&j, rows, free.len(), 1e-9 * biggest * (rows.max(free.len()) as f64))
+    };
+
+    let r = residuals(&out.prims, &filtered, &branches);
+    let tol = report_tol(prims);
+    let mut conflicts = Vec::new();
+    let mut cursor = 0usize;
+    for (i, c) in filtered.iter().enumerate() {
+        let n = c.kind.arity();
+        let worst = r[cursor..cursor + n].iter().fold(0.0_f64, |a, v| a.max(v.abs()));
+        cursor += n;
+        if worst > tol {
+            conflicts.push(origin[i]);
+        }
+    }
+
+    // ---- 哪个方向还能动（ROADMAP 0.3 的方向可视化）----------------------
+    //
+    // 逐个图元、逐个「人能读懂的动作」测它是否落在零空间里：
+    // `‖J·m‖ ≤ tol · ‖J‖ · ‖m‖`。写成比值形式是刻意的——只看绝对量会把
+    // 「大图元的小动作」误判成自由，看比值等价于问「m 与行空间夹角是否为零」。
+    let mut modes = Vec::with_capacity(prims.len());
+    let nf = free.len();
+    for (i, p) in prims.iter().enumerate() {
+        let block = layout.block(i);
+        let mut flags = 0u8;
+        for (flag, mv) in mode_vectors(p) {
+            let norm_m = mv.iter().map(|v| v * v).sum::<f64>().sqrt();
+            if norm_m <= 0.0 {
+                continue;
+            }
+            // J·m：只用到这个图元的列，其余系数是 0。
+            let mut jm = vec![0.0_f64; rows];
+            for (k, v) in mv.iter().enumerate() {
+                if *v == 0.0 {
+                    continue;
+                }
+                if let Some(col) = free.iter().position(|c| *c == block.start + k) {
+                    for (row, slot) in jm.iter_mut().enumerate() {
+                        *slot += j[row * nf + col] * v;
+                    }
+                }
+            }
+            let norm_jm = jm.iter().map(|v| v * v).sum::<f64>().sqrt();
+            if rows == 0 || norm_jm <= 1e-6 * biggest * norm_m {
+                flags |= flag;
+            }
+        }
+        modes.push(flags);
+    }
+
+    Report {
+        dof: free.len().saturating_sub(rank),
+        rank,
+        rows,
+        redundant: rows.saturating_sub(rank),
+        conflicts,
+        max_residual: max_abs(&r),
+        solved: out.converged,
+        modes,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Dense linear algebra (no external crates)
 // ---------------------------------------------------------------------------
@@ -1012,7 +1330,6 @@ pub fn solve(prims: &[Prim], moving: &[bool], raw: &[Constraint]) -> Outcome {
         }
     };
 
-    let mut j = vec![0.0; m * nf];
     let mut h = vec![0.0; nf * nf];
     let mut g = vec![0.0; nf];
     let mut dx = vec![0.0; nf];
@@ -1026,24 +1343,7 @@ pub fn solve(prims: &[Prim], moving: &[bool], raw: &[Constraint]) -> Outcome {
         iterations += 1;
 
         // ---- Jacobian by central differences ------------------------------
-        //
-        // The step is relative to each variable's own magnitude, so a
-        // coordinate near 1e5 and an angle near 0 both get a useful difference.
-        for (col, &vi) in free.iter().enumerate() {
-            let h_i = 1e-6 * x[vi].abs().max(1.0);
-            let saved = x[vi];
-
-            x[vi] = saved + h_i;
-            let rp = eval(&x, &mut pert);
-            x[vi] = saved - h_i;
-            let rm = eval(&x, &mut pert);
-            x[vi] = saved;
-
-            let inv = 1.0 / (2.0 * h_i);
-            for row in 0..m {
-                j[row * nf + col] = (rp[row] - rm[row]) * inv;
-            }
-        }
+        let j = jacobian_at(&layout, prims, &filtered, &branches, &mut x, &free, m, &mut pert);
 
         // ---- g = Jᵀr, H = JᵀJ ---------------------------------------------
         for a in 0..nf {
@@ -1393,6 +1693,173 @@ mod tests {
         };
         // 各让一半：20 和 20（而不是原地不动）
         assert!((ra - 20.0).abs() < 1e-6 && (rb - 20.0).abs() < 1e-6, "ra={ra} rb={rb}");
+    }
+
+    /// 0.3 自由度统计：这些数字会直接显示给用户，必须精确。
+    #[test]
+    fn analyze_counts_degrees_of_freedom() {
+        let line = || LineSeg::new(Vec2::new(0.0, 0.0), Vec2::new(50.0, 0.0));
+        let circle = || Circle::new(Vec2::new(0.0, 0.0), 20.0);
+        let horiz = Constraint {
+            kind: ConstraintKind::Horizontal,
+            a: Target::whole(0),
+            b: None,
+            value: 0.0,
+        };
+        let length = Constraint {
+            kind: ConstraintKind::Distance,
+            a: Target { entity: 0, point_kind: PT_START, point_index: 0 },
+            b: Some(Target { entity: 0, point_kind: PT_END, point_index: 0 }),
+            value: 80.0,
+        };
+        let radius = Constraint {
+            kind: ConstraintKind::Radius,
+            a: Target::whole(0),
+            b: None,
+            value: 20.0,
+        };
+
+        // 空草图：0 自由度、0 行，且「已解」（没有约束要违反）。
+        let r = analyze(&[], &[]);
+        assert_eq!((r.dof, r.rank, r.rows, r.redundant), (0, 0, 0, 0));
+        assert!(r.solved && r.conflicts.is_empty());
+
+        // 一条直线 = 4（两端点各 2）。
+        let r = analyze(&[Prim::Line(line())], &[]);
+        assert_eq!(r.dof, 4, "lone line");
+
+        // + 水平 = 3（旋转被钉住）。
+        let r = analyze(&[Prim::Line(line())], &[horiz]);
+        assert_eq!((r.dof, r.redundant), (3, 0));
+
+        // + 长度 = 2（只剩平移）。长度是「两端点距离」，同一个图元上。
+        let r = analyze(&[Prim::Line(line())], &[horiz, length]);
+        assert_eq!(r.dof, 2);
+        assert!(r.solved && r.conflicts.is_empty() && r.redundant == 0);
+
+        // 「长度」单独存在时半径式地不参与：直线仍是 3（4 − 1）。
+        let r = analyze(&[Prim::Line(line())], &[length]);
+        assert_eq!(r.dof, 3);
+
+        // 圆 = 3；+ 半径尺寸 = 2（圆心仍自由）。
+        let r = analyze(&[Prim::Circle(circle())], &[radius]);
+        assert_eq!(r.dof, 2);
+
+        // 半径 20 + 直径 40：一致但**多余**——不是冲突。
+        let same = Constraint {
+            kind: ConstraintKind::Diameter,
+            a: Target::whole(0),
+            b: None,
+            value: 40.0,
+        };
+        let r = analyze(&[Prim::Circle(circle())], &[radius, same]);
+        assert!(r.solved, "consistent pair must not report a conflict");
+        assert_eq!((r.dof, r.rank, r.rows, r.redundant), (2, 1, 2, 1));
+        assert!(r.conflicts.is_empty());
+
+        // 半径 20 + 直径 10：真冲突——两条都点出来，dof 不变。
+        let bad = Constraint {
+            kind: ConstraintKind::Diameter,
+            a: Target::whole(0),
+            b: None,
+            value: 10.0,
+        };
+        let r = analyze(&[Prim::Circle(circle())], &[radius, bad]);
+        assert!(!r.solved);
+        assert_eq!(r.conflicts, vec![0, 1]);
+        assert_eq!(r.dof, 2, "a contradiction does not remove freedom");
+
+        // 内核算不了的约束（拿整条直线当尺寸）被跳过，但**不能让后面的序号移位**。
+        let nonsense = Constraint {
+            kind: ConstraintKind::Distance,
+            a: Target::whole(0),
+            b: Some(Target::whole(0)),
+            value: 10.0,
+        };
+        let r = analyze(&[Prim::Circle(circle())], &[nonsense, radius, bad]);
+        assert_eq!(r.conflicts, vec![1, 2], "indices must map back onto the input list");
+    }
+
+    /// 相切：半径已冻结，但靠平移完全能满足 → 不许报成冲突。
+    #[test]
+    fn analyze_does_not_call_tangent_a_conflict() {
+        let c = Prim::Circle(Circle::new(Vec2::new(0.0, 0.0), 20.0));
+        let l = Prim::Line(LineSeg::new(Vec2::new(30.0, -50.0), Vec2::new(30.0, 50.0)));
+        let con = Constraint {
+            kind: ConstraintKind::Tangent,
+            a: Target::whole(1),
+            b: Some(Target::whole(0)),
+            value: 0.0,
+        };
+        let r = analyze(&[c, l], &[con]);
+        assert!(r.solved && r.conflicts.is_empty(), "resid={}", r.max_residual);
+        // 圆 3 + 直线 4 = 7 个参数，1 条残差 → 6 个自由度。
+        assert_eq!((r.dof, r.rank, r.rows, r.redundant), (6, 1, 1, 0));
+    }
+
+    /// 0.3 方向可视化：每个图元还剩哪些**人能读懂的动作**。
+    #[test]
+    fn analyze_reports_which_motions_are_still_free() {
+        let line = || LineSeg::new(Vec2::new(0.0, 0.0), Vec2::new(50.0, 0.0));
+        let horiz = Constraint {
+            kind: ConstraintKind::Horizontal,
+            a: Target::whole(0),
+            b: None,
+            value: 0.0,
+        };
+        let length = Constraint {
+            kind: ConstraintKind::Distance,
+            a: Target { entity: 0, point_kind: PT_START, point_index: 0 },
+            b: Some(Target { entity: 0, point_kind: PT_END, point_index: 0 }),
+            value: 80.0,
+        };
+
+        // 自由直线：平移 / 转动 / 改长度都能动。
+        let r = analyze(&[Prim::Line(line())], &[]);
+        assert_eq!(r.modes, vec![MODE_TX | MODE_TY | MODE_ROT | MODE_SIZE]);
+
+        // 加了水平：转动被钉住，平移与长度还在。
+        let r = analyze(&[Prim::Line(line())], &[horiz]);
+        assert_eq!(r.modes, vec![MODE_TX | MODE_TY | MODE_SIZE], "horizontal kills rotation");
+        assert_eq!(r.dof, 3);
+
+        // 水平 + 长度：只剩平移（长度也不能改了）。
+        let r = analyze(&[Prim::Line(line())], &[horiz, length]);
+        assert_eq!(r.modes, vec![MODE_TX | MODE_TY]);
+        assert_eq!(r.dof, 2);
+
+        // 圆：没有自己的转动；半径没写尺寸 → 可伸缩。
+        let r = analyze(&[Prim::Circle(Circle::new(Vec2::new(0.0, 0.0), 20.0))], &[]);
+        assert_eq!(r.modes, vec![MODE_TX | MODE_TY | MODE_SIZE]);
+
+        // 圆 + 半径尺寸：尺寸被定住，圆心仍可平移。
+        let rad = Constraint {
+            kind: ConstraintKind::Radius,
+            a: Target::whole(0),
+            b: None,
+            value: 20.0,
+        };
+        let r = analyze(&[Prim::Circle(Circle::new(Vec2::new(0.0, 0.0), 20.0))], &[rad]);
+        assert_eq!(r.modes, vec![MODE_TX | MODE_TY]);
+    }
+
+    /// 端点重合的两条线：绕**接点**转是自由的（绕各自质心不是）——只测质心会漏报。
+    #[test]
+    fn analyze_sees_rotation_about_a_shared_endpoint() {
+        let a = Prim::Line(LineSeg::new(Vec2::new(0.0, 0.0), Vec2::new(50.0, 0.0)));
+        let b = Prim::Line(LineSeg::new(Vec2::new(50.0, 0.0), Vec2::new(50.0, 40.0)));
+        let join = Constraint {
+            kind: ConstraintKind::Coincident,
+            a: Target { entity: 0, point_kind: PT_END, point_index: 0 },
+            b: Some(Target { entity: 1, point_kind: PT_START, point_index: 0 }),
+            value: 0.0,
+        };
+        let r = analyze(&[a, b], &[join]);
+        assert!(r.solved && r.conflicts.is_empty());
+        assert_eq!(r.modes[0] & MODE_ROT, MODE_ROT, "line A can swing about the joint");
+        assert_eq!(r.modes[1] & MODE_ROT, MODE_ROT, "line B can swing about the joint");
+        // 8 个参数、2 条残差 → 6 个自由度
+        assert_eq!(r.dof, 6);
     }
 
     /// 过约束退化：一个圆同时被半径 35 和直径 20（即 r=10）钉住，必须收敛到

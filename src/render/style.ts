@@ -36,16 +36,31 @@ export const UI_COLORS = {
   preview: '#8f9aa8',
   /** A destructive preview — trim's "this piece is about to be removed". */
   cut: '#ff5d5d',
+  /** 冲突草图：约束无法同时成立的图元（ROADMAP 0.3）。比选中色更刺眼。 */
+  conflict: '#ff3b30',
+  conflictWidth: 3,
+  /** 欠约束方向标记（0.3）：青色，与捕捉标记同族但不撞色。 */
+  dof: '#3fd0d8',
 } as const;
 
 /**
  * Resolve an entity's final render style, applying the interaction-state
  * overrides on top of the layer-resolved appearance.
+ *
+ * `conflicting` is applied **last, over `selected`**: a conflicting sketch has to
+ * be visible as such even while you are working on it, and the amber selection
+ * colour would hide exactly the curves the status bar is complaining about.
+ * （选中反馈另有右栏约束列表与状态栏「已选 N」，不会被这条压掉。）
  */
 export function resolveRenderStyle(
   doc: CadDocument,
   e: Entity,
-  state: { selected?: boolean; hovered?: boolean; preview?: boolean } = {},
+  state: {
+    selected?: boolean;
+    hovered?: boolean;
+    preview?: boolean;
+    conflicting?: boolean;
+  } = {},
 ): RenderStyle {
   const layer = findLayer(doc, e.layer);
   const color = e.color ?? layer?.color ?? '#e8e8e8';
@@ -66,6 +81,9 @@ export function resolveRenderStyle(
   }
   if (state.selected) {
     out = { ...out, color: UI_COLORS.selected, width: UI_COLORS.selectedWidth, dash: null };
+  }
+  if (state.conflicting) {
+    out = { ...out, color: UI_COLORS.conflict, width: UI_COLORS.conflictWidth, dash: null };
   }
   return out;
 }

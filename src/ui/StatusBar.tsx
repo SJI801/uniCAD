@@ -10,6 +10,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { useEditor } from '../state/editorStore';
 import { ALIAS_TO_TOOL } from '../tools/registry';
 import { fmt, SNAP_KIND_LABEL, type ConstraintMode } from '../core/types';
+import { describeConstraint } from '../core/constraints';
 
 export default function StatusBar(): React.ReactElement {
   const prompt = useEditor((s) => s.prompt);
@@ -217,6 +218,8 @@ export default function StatusBar(): React.ReactElement {
         <span className="status-chip mono dim">图元 {doc.entities.length}</span>
         {selection.size > 0 && <span className="status-chip accent">已选 {selection.size}</span>}
 
+        <SketchStatusChip />
+
         <span className="status-spacer" />
 
         <span className="status-chip mono dim">历史 {history.depth}</span>
@@ -225,6 +228,83 @@ export default function StatusBar(): React.ReactElement {
         </span>
       </div>
     </div>
+  );
+}
+
+/**
+ * 草图状态 chip（ROADMAP 0.3）：欠约束 / 完全定义 / 过约束。
+ *
+ * 三态而不是一个数字，因为用户要回答的是不同的问题：
+ * 「还差多少」→ 数字；「是不是定死了」→ 完全定义；「为什么形状不听话」→ 冲突项。
+ * `report === null` 时**不画**这个 chip（内核没就绪 / 还没约束）——显示 0 会被读成
+ * 「完全定义」，那是撒谎。
+ *
+ * 点一下把完整详情写进日志：悬停 tooltip 放不下几条冲突，日志区能。
+ */
+function SketchStatusChip(): React.ReactElement | null {
+  const report = useEditor((s) => s.constraintReport);
+  const doc = useEditor((s) => s.doc);
+  const pushLog = useEditor((s) => s.pushLog);
+  if (!report) return null;
+
+  const conflicts = report.conflicting;
+  const bad = conflicts.length > 0;
+  const unconstrained = report.constraintCount === 0;
+  const text = bad
+    ? `过约束 · 冲突 ${conflicts.length}`
+    : unconstrained
+      ? `无约束 · ${report.dof} 自由度`
+      : report.dof === 0
+        ? report.redundant > 0
+          ? `完全定义 · 多余 ${report.redundant}`
+          : '完全定义'
+        : `欠约束 ${report.dof}`;
+
+  const tooltip = [
+    `草图状态（活动基准面）：${report.entityCount} 个图元 / ${report.constraintCount} 条约束`,
+    unconstrained
+      ? `还没加任何约束：${report.dof} 个自由度全都在（每条线的两端点各 2 个）。`
+      : report.dof > 0
+        ? `欠约束：还剩 ${report.dof} 个自由度。注意本版本没有「固定/锚点」约束，所以刚体的平移与转动自由度消不掉——数字不会自己到 0。`
+        : '完全定义：没有剩余自由度。',
+    report.redundant > 0
+      ? `多余约束 ${report.redundant} 条：与别的约束等价，删掉不会改变形状（不是错误）。`
+      : '',
+    bad
+      ? `冲突 ${conflicts.length} 条（无法同时成立）：\n${conflicts
+          .map((c) => `  · ${describeConstraint(c, doc)}`)
+          .join('\n')}`
+      : '',
+    report.dof > 0
+      ? '选中图元会在画布上画出它还能动的方向：十字箭头 = 可平移，「转」= 还能转，「尺寸」= 尺寸未定（跟「约束标记」开关一起显隐）。'
+      : '',
+    '点击把详情写进下方日志。',
+  ]
+    .filter((s) => s !== '')
+    .join('\n');
+
+  return (
+    <button
+      className={`status-chip mono ${bad ? 'err' : unconstrained ? 'dim' : report.dof === 0 ? 'ok' : 'dim'}`}
+      title={tooltip}
+      onClick={() => {
+        pushLog(
+          `草图: ${
+            bad
+              ? `过约束（冲突 ${conflicts.length} 条）`
+              : unconstrained
+                ? `无约束（${report.dof} 个自由度）`
+                : report.dof === 0
+                  ? '完全定义'
+                  : `欠约束 ${report.dof}`
+          }` + `${report.redundant > 0 ? ` · 多余 ${report.redundant}` : ''}`,
+        );
+        for (const c of conflicts) pushLog(`⚠ 冲突: ${describeConstraint(c, doc)}`);
+        if (bad) pushLog('  冲突 = 这些约束不能同时成立；删掉其中一条（右栏约束列表）即可。');
+      }}
+    >
+      {text}
+    </button>
   );
 }
 

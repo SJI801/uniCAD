@@ -32,7 +32,14 @@ import type {
   EntityId,
   Vec2,
 } from './types';
-import { CONSTRAINT_KIND_TAG, CONSTRAINT_POINT_TAG, UNARY_CONSTRAINTS, fmt, fmtAngle } from './types';
+import {
+  CONSTRAINT_KIND_TAG,
+  CONSTRAINT_POINT_TAG,
+  UNARY_CONSTRAINTS,
+  fmt,
+  fmtAngle,
+  planeOf,
+} from './types';
 import { constraintPointAt, describeEntity } from './entities';
 import { kernelOrNull, packOne, packScene } from './kernel';
 
@@ -590,6 +597,126 @@ export function isSelfDimension(c: Constraint): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// Degrees-of-freedom report (ROADMAP 0.3)
+// ---------------------------------------------------------------------------
+
+/** 「这条草图现在是什么状态」—— 状态栏与画布配色都用它。 */
+export interface ConstraintReport {
+  /** Remaining degrees of freedom; `0` means 完全定义. */
+  dof: number;
+  /** Constraints that add nothing new (consistent, just redundant). */
+  redundant: number;
+  /** Every constraint satisfied? */
+  solved: boolean;
+  /** 无法同时成立的约束（原对象），用于点名。 */
+  conflicting: Constraint[];
+  /** 冲突涉及的图元 —— 画成警示红。 */
+  conflictingEntities: Set<EntityId>;
+  /**
+   * 图元 id → 它**还能往哪动**的位掩码（`DOF_MODE`）。
+   *
+   * 这是「方向」那一半：`dof` 说还差几个，这里说差在哪。内核拿已经算出来的
+   * 雅可比逐图元测「平移 / 转动 / 改尺寸」是否落在零空间里——落在里面就等于
+   * 「这个动作不会破坏任何一条已加的约束」。
+   */
+  freeModes: Map<EntityId, number>;
+  /** 参与统计的图元数（活动基准面上的），用于文案。 */
+  entityCount: number;
+  /** 真正送进统计的约束条数。 */
+  constraintCount: number;
+}
+
+/** 内核 `MODE_*` 的镜像：一个图元还能做的**可读动作**。 */
+export const DOF_MODE = {
+  /** 可沿 +X/−X 平移。 */
+  tx: 1,
+  /** 可沿 +Y/−Y 平移。 */
+  ty: 2,
+  /** 可绕某个命名点/质心转动。 */
+  rot: 4,
+  /** 尺寸未定（半径 / 长度 / 半轴还能变）。 */
+  size: 8,
+} as const;
+
+/**
+ * Analyze the **active sketch**: the entities on the active datum plane, against
+ * every constraint that references them.
+ *
+ * Scope choices, all deliberate:
+ *
+ * * **Active plane only.** A constraint is a relationship inside one sketch; the
+ *   status bar reports the sketch you are drawing on, not a sum over all planes.
+ * * **Document-wide, not selection-wide.** 「还剩多少自由度」 is a property of the
+ *   sketch, so an unconstrained line on the same plane still contributes its four
+ *   degrees of freedom. (AutoCAD reports the selection; SolidWorks reports the
+ *   sketch. This is the sketch number.)
+ * * **`null` only when there is genuinely nothing to say** — no kernel yet, an
+ *   older wasm without the export, or an empty plane. A sketch with **zero**
+ *   constraints is still a valid report (`constraintCount === 0`, every motion
+ *   free): that is exactly the state a freshly drawn curve is in, and the canvas
+ *   markers have to be able to say "this line can still do anything". The status
+ *   bar words that state as 无约束 rather than as a bare number.
+ *
+ * Cost: one extra kernel call per document change (not per frame — callers skip
+ * live previews). The kernel only ranks a Jacobian whose rows are the residuals
+ * and whose columns are the sketch's parameters, which is cheap for the sketch
+ * sizes this app deals with; with no constraints at all the Jacobian is empty
+ * and the whole thing short-circuits.
+ */
+export function analyzeDocument(doc: CadDocument): ConstraintReport | null {
+  const kernel = kernelOrNull();
+  if (!kernel) return null;
+  // A wasm build from before the report existed has no such export.
+  if (typeof kernel.analyze_constraints !== 'function') return null;
+
+  const scene = doc.entities.filter((e) => planeOf(e) === doc.activePlane);
+  if (scene.length === 0) return null;
+
+  const { flat, sent } = constraintInputs(doc, scene);
+  if (flat.length === 0 && doc.constraints.length > 0) {
+    // 有约束，但没有一条落在活动基准面上（都在别的面 / 对象已删）：说不清，
+    // 不假装「没有约束」。
+    return null;
+  }
+
+  const packed = packScene(scene);
+  const out = kernel.analyze_constraints(packed.encoded, packed.counts, Float64Array.from(flat));
+  if (!out || out.length < 7) return null;
+
+  const conflicting: Constraint[] = [];
+  for (let i = 7; i < 7 + out[6]!; i++) {
+    const c = sent[out[i]!];
+    if (c) conflicting.push(c);
+  }
+  const conflictingEntities = new Set<EntityId>();
+  for (const c of conflicting) {
+    conflictingEntities.add(c.a.entity);
+    if (c.b) conflictingEntities.add(c.b.entity);
+  }
+
+  // 尾部：`modeCount` + 每个图元一个位掩码，与传入的 `scene` 同序。
+  const freeModes = new Map<EntityId, number>();
+  const modeStart = 7 + out[6]! + 1;
+  const modeCount = out[7 + out[6]!] ?? 0;
+  for (let i = 0; i < modeCount; i++) {
+    const e = scene[i];
+    const flags = out[modeStart + i];
+    if (e && flags !== undefined) freeModes.set(e.id, flags);
+  }
+
+  return {
+    dof: out[0]!,
+    redundant: out[3]!,
+    solved: out[5]! !== 0,
+    conflicting,
+    conflictingEntities,
+    freeModes,
+    entityCount: scene.length,
+    constraintCount: sent.length,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // The solver bridge
 // ---------------------------------------------------------------------------
 
@@ -609,25 +736,26 @@ export function isSelfDimension(c: Constraint): boolean {
  *   decode failure, nothing movable. The caller then keeps the naive geometry,
  *   which is exactly the pre-feature behaviour rather than a corrupted document.
  */
-export function solveConstraints(doc: CadDocument, movingIds: Iterable<EntityId>): Entity[] {
-  const kernel = kernelOrNull();
-  if (!kernel || doc.constraints.length === 0) return [];
+/**
+ * 把「一批图元 + 文档里的约束」压成内核要的形状。
+ *
+ * 解算与自由度分析共用这一份装配，理由很实际：两边对「约束怎么编号、哪个槽位
+ * 是目标值」必须**逐位一致**，否则冲突序号会指到别的约束上。
+ *
+ * `sent` 与 `flat` 一一对应（每 8 个数一条），保留的是**原对象**——内核回话里的
+ * 冲突序号指向 `flat` 的顺序，前端要靠它回指到 `doc.constraints` 里的那一条。
+ */
+interface ConstraintInputs {
+  flat: number[];
+  sent: Constraint[];
+}
 
-  const moving = new Set(movingIds);
-  const involvedIds = new Set<EntityId>();
-  for (const c of doc.constraints) {
-    involvedIds.add(c.a.entity);
-    if (c.b) involvedIds.add(c.b.entity);
-  }
-
-  const involved = doc.entities.filter((e) => involvedIds.has(e.id));
-  // Nothing to do unless something that participates is allowed to move.
-  if (!involved.some((e) => moving.has(e.id))) return [];
-
+function constraintInputs(doc: CadDocument, scene: readonly Entity[]): ConstraintInputs {
   const index = new Map<EntityId, number>();
-  involved.forEach((e, i) => index.set(e.id, i));
+  scene.forEach((e, i) => index.set(e.id, i));
 
   const flat: number[] = [];
+  const sent: Constraint[] = [];
   for (const c of doc.constraints) {
     const ia = index.get(c.a.entity);
     if (ia === undefined) continue;
@@ -656,7 +784,27 @@ export function solveConstraints(doc: CadDocument, movingIds: Iterable<EntityId>
       // 第 8 个数 = 尺寸目标值；几何约束恒为 0，内核侧同样忽略。
       c.value ?? 0,
     );
+    sent.push(c);
   }
+  return { flat, sent };
+}
+
+export function solveConstraints(doc: CadDocument, movingIds: Iterable<EntityId>): Entity[] {
+  const kernel = kernelOrNull();
+  if (!kernel || doc.constraints.length === 0) return [];
+
+  const moving = new Set(movingIds);
+  const involvedIds = new Set<EntityId>();
+  for (const c of doc.constraints) {
+    involvedIds.add(c.a.entity);
+    if (c.b) involvedIds.add(c.b.entity);
+  }
+
+  const involved = doc.entities.filter((e) => involvedIds.has(e.id));
+  // Nothing to do unless something that participates is allowed to move.
+  if (!involved.some((e) => moving.has(e.id))) return [];
+
+  const { flat } = constraintInputs(doc, involved);
   if (flat.length === 0) return [];
 
   const scene = packScene(involved);

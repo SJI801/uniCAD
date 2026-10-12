@@ -30,8 +30,11 @@ export interface DimLabel {
   x: number;
   y: number;
   text: string;
-  /** `live` = 绘制中的实时读数；`selected` = 选中图元的尺寸；`constraint` = 约束标记。 */
-  kind: 'live' | 'selected' | 'constraint';
+  /**
+   * `live` = 绘制中的实时读数；`selected` = 选中图元的尺寸；`constraint` = 约束标记；
+   * `dof` = 欠约束方向标记（⟳ / ⤢，见 `dofMarks.ts`）。
+   */
+  kind: 'live' | 'selected' | 'constraint' | 'dof';
   /**
    * Hover text. Only constraint badges set it — a dimension's text *is* its
    * meaning, but a one-character badge needs the full sentence spelled out or it

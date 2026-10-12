@@ -696,6 +696,23 @@ body {
   }
 }
 
+/* 欠约束方向标记（0.3）：⟳ 转动 / ⤢ 尺寸未定。同样是可悬停的小徽章
+   （带 title 说明「还能怎么动」），所以也要 pointer-events: auto。 */
+.dim-label.dof {
+  padding: 0 5px;
+  border-color: #2b6f74;
+  background: rgba(16, 19, 24, 0.8);
+  color: #3fd0d8;
+  cursor: help;
+  pointer-events: auto;
+}
+
+@media (prefers-color-scheme: light) {
+  .dim-label.dof {
+    background: rgba(255, 255, 255, 0.86);
+  }
+}
+
 .canvas-hud {
   position: absolute;
   top: 8px;
@@ -1284,6 +1301,15 @@ button.status-chip:hover {
 .status-chip.warn {
   color: var(--warn);
   border-color: var(--warn);
+}
+
+/* 过约束 / 无解的草图：ROADMAP 0.3 要求「标红」，所以这里用实心红底，
+   比 .warn 的黄边更难忽略——它表示形状根本立不住，不是提示。 */
+.status-chip.err {
+  color: #fff;
+  background: #c0392b;
+  border-color: #ff5d5d;
+  font-weight: 600;
 }
 
 .status-spacer {

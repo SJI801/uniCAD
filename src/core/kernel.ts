@@ -176,6 +176,18 @@ export interface KernelModule {
   ): Float64Array;
 
   /**
+   * 草图自由度报告 —— 欠约束 / 完全定义 / 多余 / 冲突（ROADMAP 0.3）。
+   *
+   * `[dof, rank, rows, redundant, maxResidual, solved, conflictCount,
+   * ...conflictIndices]`，索引指向**传入的**约束数组。与 `solve_constraints`
+   * 不同，它**没有 `moving`**：「还剩多少自由度」是草图的属性，与哪次拖动无关。
+   * 空数组表示场景没解出来——此时前端什么都不显示，而不是显示一个 0。
+   */
+  analyze_constraints(
+    encoded: Float64Array, counts: Uint32Array, constraints: Float64Array,
+  ): Float64Array;
+
+  /**
    * Cut `target_index` back to its cutting edges at `(px, py)`.
    *
    * Returns `[tag, count, ...pieces]` where each piece is a wire-format
