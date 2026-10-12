@@ -1,0 +1,33 @@
+{
+  "name": "unicad",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "uniCAD - a browser-based 2D CAD editor built on TypeScript + WebGL2 + a Rust/WASM geometry kernel",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.app.json",
+    "wasm": "node scripts/build-wasm.mjs",
+    "wasm:dev": "node scripts/build-wasm.mjs --dev",
+    "build:full": "npm run wasm && npm run build"
+  },
+  "dependencies": {
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "zustand": "^5.0.3"
+  },
+  "devDependencies": {
+    "@types/react": "^19.1.0",
+    "@types/react-dom": "^19.1.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.7.3",
+    "vite": "^6.0.11",
+    "vitest": "^3.0.5"
+  },
+  "optionalDependencies": {
+    "@esbuild/win32-x64": "^0.28.2",
+    "@rollup/rollup-win32-x64-msvc": "^4.64.5"
+  }
+}

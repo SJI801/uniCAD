@@ -1,0 +1,1440 @@
+/* ==========================================================================
+   uniCAD — global stylesheet
+   Dark, dense, engineering-tool aesthetic: monospace numerals, compact rows,
+   high-contrast accents. Light theme is honoured via prefers-color-scheme.
+   ========================================================================== */
+
+:root {
+  --bg-deep: #0f1115;
+  --bg-panel: #171a20;
+  --bg-panel-alt: #1c2027;
+  --bg-elevated: #22262e;
+  --bg-input: #101318;
+  --bg-hover: #262b34;
+  --canvas-bg: #14161a;
+
+  --border: #2a2f38;
+  --border-strong: #3a4150;
+
+  --text: #d7dce4;
+  --text-dim: #8b93a1;
+  --text-faint: #5c6472;
+
+  --accent: #4ea3ff;
+  --accent-dim: #2b6fb8;
+  --accent-soft: rgba(78, 163, 255, 0.14);
+  --ok: #3fd07a;
+  --warn: #ffb020;
+  --danger: #ff5d5d;
+  --snap: #43d17c;
+
+  --mono: 'JetBrains Mono', 'Cascadia Code', 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace;
+  --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
+
+  --radius: 5px;
+  --radius-sm: 3px;
+
+  --header-h: 42px;
+  --ribbon-h: 62px;
+  --ribbon-h-collapsed: 34px;
+  --status-h: 96px;
+  --panel-w: 268px;
+
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg-deep: #eceef1;
+    --bg-panel: #f7f8fa;
+    --bg-panel-alt: #ffffff;
+    --bg-elevated: #ffffff;
+    --bg-input: #ffffff;
+    --bg-hover: #e8ebef;
+    --canvas-bg: #f2f3f5;
+
+    --border: #d5d9e0;
+    --border-strong: #b9c0cb;
+
+    --text: #1e2329;
+    --text-dim: #5a626e;
+    --text-faint: #8b93a1;
+
+    --accent: #1a73e8;
+    --accent-dim: #1558b0;
+    --accent-soft: rgba(26, 115, 232, 0.12);
+    --ok: #1e9e57;
+    --warn: #b8730a;
+    --danger: #d33636;
+    --snap: #159a55;
+
+    color-scheme: light;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--bg-deep);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 12.5px;
+  line-height: 1.45;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+.mono {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 11.5px;
+}
+
+.dim {
+  color: var(--text-dim);
+}
+
+.readonly {
+  color: var(--text-dim);
+  user-select: text;
+}
+
+/* ==========================================================================
+   Shell
+   ========================================================================== */
+
+.workbench {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.app-header {
+  height: var(--header-h);
+  flex: 0 0 var(--header-h);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 14px;
+  background: linear-gradient(180deg, var(--bg-elevated), var(--bg-panel));
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.brand-mark {
+  color: var(--accent);
+  font-size: 16px;
+  line-height: 1;
+}
+
+.brand-name {
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  font-size: 14px;
+}
+
+.brand-sub {
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.header-meta {
+  display: flex;
+  gap: 8px;
+}
+
+.header-chip {
+  padding: 2px 9px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 11px;
+  font-family: var(--mono);
+  background: var(--bg-panel-alt);
+}
+
+/* ==========================================================================
+   Ribbon
+   ========================================================================== */
+
+.ribbon {
+  height: var(--ribbon-h);
+  flex: 0 0 var(--ribbon-h);
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  padding: 5px 8px 4px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+/* Each group is a card.
+ *
+ * It used to be a bare column delimited only by a 1 px hairline, which made the
+ * ribbon read as one undifferentiated row of buttons. A subtle card (slightly
+ * lifted background + border + radius) is what actually says "these belong
+ * together" — and it lets the hairline separators go, so the eye groups by
+ * shape instead of counting dividers. The caption sits pinned to the bottom of
+ * the card, clear of whatever the buttons are doing. */
+.ribbon-group {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 1px;
+  padding: 3px 5px 1px;
+  flex: 0 0 auto;
+  background: var(--bg-panel-alt);
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+
+.ribbon-group.grow {
+  flex: 0 0 auto;
+}
+
+.ribbon-group-body {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.ribbon-group-label {
+  text-align: center;
+  color: var(--text-faint);
+  font-size: 10px;
+  padding-top: 2px;
+  letter-spacing: 0.03em;
+  user-select: none;
+}
+
+.ribbon-sep {
+  width: 1px;
+  margin: 5px 5px;
+  background: var(--border);
+  flex: 0 0 1px;
+}
+
+/* The cards already separate the groups, so the hairline dividers are redundant
+   clutter in the expanded bar — drop them there. The collapsed row is a flat
+   single strip with no cards, so it keeps them. */
+.ribbon:not(.collapsed) .ribbon-sep {
+  display: none;
+}
+
+/* Never wrap.
+ *
+ * The bar is a fixed 62 px tall with `overflow-y: hidden`, so a second row is
+ * not "tight" — it is *invisible*: the row grows past the box and gets clipped
+ * along with the group caption underneath it. With `wrap` the group also stayed
+ * within the container, so nothing overflowed and the ribbon never scrolled —
+ * the content just silently disappeared. Horizontal overflow belongs to the
+ * ribbon's own `overflow-x: auto`, and the collapse button is sticky to the
+ * right edge, so it stays reachable however wide the bar gets. */
+.osnap-row {
+  flex-wrap: nowrap;
+  gap: 2px;
+}
+
+.osnap-divider {
+  width: 1px;
+  height: 18px;
+  background: var(--border);
+  margin: 0 5px;
+}
+
+/* --------------------------------------------------------------------------
+   Collapsed ribbon — the whole bar folds down to a single 34 px row.
+   --------------------------------------------------------------------------
+   Every group caption goes away, and the .ribbon-group column layout that
+   existed only to host those captions goes with it: the controls become the
+   bar's direct flex children. The buttons keep their identity instead of being
+   dropped — the drawing tools shrink to glyph-only squares, and the two groups
+   that have no meaningful glyph (文件 / 交换) fold into one dropdown rather
+   than vanishing off the edge.
+   -------------------------------------------------------------------------- */
+
+.ribbon.collapsed {
+  height: var(--ribbon-h-collapsed);
+  flex: 0 0 var(--ribbon-h-collapsed);
+  align-items: center;
+  padding: 3px 8px;
+}
+
+/* The bar centres its children by height, so a separator no longer stretches
+   itself and needs an explicit one. */
+.ribbon.collapsed .ribbon-sep {
+  height: 20px;
+  margin: 0 4px;
+}
+
+/* Pushes 缩放范围 + the toggle to the right edge when there is room to spare.
+   Once the row overflows it collapses to its min-width and the bar scrolls,
+   which is the intended degradation. */
+.ribbon-spacer {
+  flex: 1 1 auto;
+  min-width: 8px;
+}
+
+/* Pinned to the right edge of the scrollport.
+
+   `position: sticky` rather than a plain flex child: the ribbon is an
+   `overflow-x: auto` scroller, and once the controls overflow, an in-flow
+   toggle at the far right is *off-screen* — so the one control that gives the
+   space back would be the one control you cannot reach. Sticky keeps it on
+   screen at every window width. The opaque background is what stops the
+   controls from showing through as they scroll underneath. */
+.ribbon-toggle {
+  position: sticky;
+  right: 0;
+  flex: 0 0 auto;
+  align-self: center;
+  width: 22px;
+  height: 26px;
+  margin-left: 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 11px;
+  line-height: 1;
+  transition: background 90ms ease, border-color 90ms ease, color 90ms ease;
+}
+
+.ribbon-toggle:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+/* --------------------------------------------------------------------------
+   Ribbon dropdown (collapsed mode only)
+   -------------------------------------------------------------------------- */
+
+/* `position: fixed`, not absolute: the ribbon is an `overflow-x: auto` scroller
+   and would clip a dropdown that lived inside it. The coordinates come from the
+   trigger's getBoundingClientRect(). */
+.ribbon-menu {
+  position: fixed;
+  z-index: 60;
+  min-width: 178px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+}
+
+.ribbon-menu-item {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 5px 8px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  cursor: pointer;
+  font-family: var(--sans);
+  font-size: 12px;
+  text-align: left;
+}
+
+.ribbon-menu-item:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border);
+}
+
+.ribbon-menu-item:disabled {
+  opacity: 0.36;
+  cursor: not-allowed;
+}
+
+.ribbon-menu-key {
+  color: var(--text-faint);
+  font-family: var(--mono);
+  font-size: 10.5px;
+}
+
+.ribbon-menu-sep {
+  height: 1px;
+  margin: 3px 4px;
+  background: var(--border);
+}
+
+/* The constraint menu has to fit a badge glyph column plus — on the rows the
+   current selection cannot satisfy — a sentence explaining why. Hence wider,
+   left-aligned, and the reason wraps under the label instead of squeezing it. */
+.ribbon-menu.wide {
+  min-width: 268px;
+  max-width: 320px;
+}
+
+.ribbon-menu.wide .ribbon-menu-item {
+  align-items: center;
+  justify-content: flex-start;
+  gap: 9px;
+  padding: 5px 8px;
+}
+
+.ribbon-menu-glyph {
+  flex: 0 0 16px;
+  width: 16px;
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 13px;
+  text-align: center;
+}
+
+.ribbon-menu-item:disabled .ribbon-menu-glyph {
+  color: var(--text-faint);
+}
+
+.ribbon-menu-label {
+  flex: 1 1 auto;
+  white-space: nowrap;
+}
+
+.ribbon-menu.wide .ribbon-menu-key {
+  flex: 0 1 auto;
+  max-width: 190px;
+  text-align: right;
+  line-height: 1.35;
+}
+
+/* ==========================================================================
+   Buttons
+   ========================================================================== */
+
+.tool-btn {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1px;
+  min-width: 46px;
+  height: 34px;
+  padding: 2px 7px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  cursor: pointer;
+  font-family: var(--sans);
+  font-size: 10.5px;
+  line-height: 1.15;
+  white-space: nowrap;
+  transition: background 90ms ease, border-color 90ms ease, color 90ms ease;
+}
+
+.tool-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--border);
+}
+
+.tool-btn.active {
+  background: var(--accent-soft);
+  border-color: var(--accent-dim);
+  color: var(--accent);
+}
+
+.tool-btn:disabled {
+  opacity: 0.36;
+  cursor: not-allowed;
+}
+
+/* Command buttons (文件 / 修改 / 视图) share the drawing tools' height and
+   radius so the whole bar reads as one set of controls, not two. They carry no
+   glyph, so the label simply centres in the same 34 px slot. */
+.tool-btn.wide {
+  min-width: 46px;
+  height: 34px;
+  flex-direction: column;
+  font-size: 11.5px;
+  padding: 2px 9px;
+}
+
+.tool-btn.compact {
+  min-width: 0;
+  height: 26px;
+  padding: 0 7px;
+  font-size: 11px;
+  flex-direction: row;
+}
+
+/* Glyph-only square, used by the collapsed ribbon where a label would double
+   the width of the row. The glyph keeps the accent tint (a `.tool-glyph` child)
+   while action glyphs such as ↶ / ✕ are plain spans and inherit the button
+   colour — that is what lets `.danger` tint the delete icon on hover. */
+.tool-btn.icon {
+  min-width: 26px;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  gap: 0;
+  flex-direction: row;
+}
+
+.tool-btn.icon > span {
+  font-size: 14px;
+  line-height: 1;
+}
+
+.tool-btn.danger:hover:not(:disabled) {
+  background: rgba(255, 93, 93, 0.16);
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
+.tool-glyph {
+  font-size: 15px;
+  line-height: 1;
+  color: var(--accent);
+}
+
+.tool-btn.active .tool-glyph {
+  color: var(--accent);
+}
+
+.tool-name {
+  font-size: 10px;
+}
+
+.mini-btn {
+  padding: 3px 9px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  cursor: pointer;
+  font-size: 11px;
+}
+
+.mini-btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--border-strong);
+}
+
+.icon-btn {
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 10px;
+  line-height: 1;
+}
+
+.icon-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.icon-btn.danger:hover {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+
+/* ==========================================================================
+   Body layout
+   ========================================================================== */
+
+.app-body {
+  flex: 1 1 auto;
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.side-panel {
+  width: var(--panel-w);
+  flex: 0 0 var(--panel-w);
+  background: var(--bg-panel);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.side-panel.left {
+  border-right: 1px solid var(--border);
+}
+
+.side-panel.right {
+  border-left: 1px solid var(--border);
+  overflow-y: auto;
+}
+
+.canvas-column {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+
+/* ==========================================================================
+   Canvas
+   ========================================================================== */
+
+.canvas-host {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  background: var(--canvas-bg);
+  overflow: hidden;
+  touch-action: none;
+}
+
+.canvas-gl {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+/* --------------------------------------------------------------------------
+   自动尺寸的 DOM 覆盖层
+   --------------------------------------------------------------------------
+   文字走 DOM 而不是 GPU：浏览器自己的光栅化器出的字比字形图集清晰得多，也
+   便宜得多。代价是这一层不能有 React 子元素 —— 里面的节点由 CanvasView 的
+   渲染循环手工池化维护，React 一旦也去 diff 这棵子树就会互相打架。
+   -------------------------------------------------------------------------- */
+
+.dim-layer {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  /* 标注是纯提示，绝不能挡住画布的拾取与拖拽。 */
+  pointer-events: none;
+}
+
+.dim-label {
+  position: absolute;
+  top: 0;
+  left: 0;
+  /* 位置由 JS 每帧写 --dx / --dy，居中偏移留在样式表里。 */
+  transform: translate(-50%, -50%) translate(var(--dx, 0), var(--dy, 0));
+  padding: 1px 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: rgba(16, 19, 24, 0.92);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.5;
+  white-space: nowrap;
+  /* 每帧只动 transform，交给合成层，不触发重排。 */
+  will-change: transform;
+}
+
+@media (prefers-color-scheme: light) {
+  .dim-label {
+    background: rgba(255, 255, 255, 0.94);
+  }
+}
+
+/* 绘制中的读数：正在看的那个数字，用强调色。 */
+.dim-label.live {
+  border-color: var(--accent-dim);
+  color: var(--accent);
+}
+
+/* 选中图元的尺寸：跟着选中态走（与渲染层的 selected 同为琥珀色）。 */
+.dim-label.selected {
+  border-color: #8a6520;
+  color: #ffb020;
+}
+
+/* 约束标记：一个字符宽的小徽章，挂在被约束的点旁边。
+   唯一允许接收指针事件的标注 —— 它带 title（悬停说明「谁与谁相切」），
+   而 `pointer-events: none` 的父层会让 title 永远不出现。
+   代价是徽章盖住的那一小块画布拾取不到，13×13 的面积，可以接受。 */
+.dim-label.constraint {
+  padding: 0 5px;
+  border-color: var(--accent-dim);
+  background: rgba(16, 19, 24, 0.8);
+  color: var(--accent);
+  font-size: 11px;
+  cursor: help;
+  pointer-events: auto;
+}
+
+@media (prefers-color-scheme: light) {
+  .dim-label.constraint {
+    background: rgba(255, 255, 255, 0.86);
+  }
+}
+
+.canvas-hud {
+  position: absolute;
+  top: 8px;
+  right: 10px;
+  display: flex;
+  gap: 6px;
+  pointer-events: none;
+}
+
+.hud-item {
+  padding: 2px 8px;
+  background: rgba(0, 0, 0, 0.42);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--text-dim);
+  backdrop-filter: blur(3px);
+}
+
+.hud-item.warn {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.canvas-error {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 40px;
+  text-align: center;
+}
+
+.canvas-error h2 {
+  color: var(--danger);
+  font-size: 16px;
+  margin: 0;
+}
+
+.canvas-error .hint {
+  color: var(--text-dim);
+}
+
+/* ==========================================================================
+   Panels
+   ========================================================================== */
+
+.panel-tabs {
+  display: flex;
+  flex: 0 0 auto;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-panel-alt);
+}
+
+.panel-tab {
+  flex: 1;
+  padding: 7px 4px;
+  background: transparent;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  font-size: 11.5px;
+}
+
+.panel-tab:hover {
+  color: var(--text);
+}
+
+.panel-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+  background: var(--accent-soft);
+}
+
+.panel-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.panel-section {
+  padding: 9px 11px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.panel-section h3 {
+  margin: 0 0 7px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+}
+
+.panel-hint {
+  color: var(--text-faint);
+  font-size: 11px;
+  margin: 8px 0 0;
+  line-height: 1.5;
+}
+
+.layer-header {
+  margin-bottom: 7px;
+}
+
+/* ==========================================================================
+   Tables & grids
+   ========================================================================== */
+
+.layer-table,
+.shortcut-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.layer-table th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--text-faint);
+  font-size: 10px;
+  padding: 3px 4px;
+  border-bottom: 1px solid var(--border);
+  white-space: nowrap;
+}
+
+.layer-table td {
+  padding: 2px 4px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.035);
+}
+
+.layer-table tr.current {
+  background: var(--accent-soft);
+}
+
+.layer-table .center {
+  text-align: center;
+}
+
+.layer-table .w-toggle {
+  width: 22px;
+}
+.layer-table .w-color {
+  width: 32px;
+}
+.layer-table .w-num {
+  width: 34px;
+}
+.layer-table .w-line {
+  width: 74px;
+}
+.layer-table .w-del {
+  width: 22px;
+}
+
+.cell-input,
+.cell-select {
+  width: 100%;
+  padding: 2px 5px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11px;
+  min-width: 0;
+}
+
+.cell-input:focus,
+.cell-select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.color-input {
+  width: 26px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  cursor: pointer;
+}
+
+.dot-btn {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  border: 1.5px solid var(--border-strong);
+  background: transparent;
+  cursor: pointer;
+  padding: 0;
+}
+
+.dot-btn.on {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.count-btn {
+  background: transparent;
+  border: none;
+  color: var(--accent);
+  cursor: pointer;
+  font-family: var(--mono);
+  font-size: 11px;
+  padding: 0 3px;
+}
+
+.count-btn:hover {
+  text-decoration: underline;
+}
+
+.prop-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+
+.badge {
+  padding: 2px 8px;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent-dim);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 11px;
+}
+
+.prop-section {
+  margin: 12px 0 6px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-faint);
+  font-weight: 600;
+}
+
+.prop-grid,
+.kv-grid {
+  display: grid;
+  grid-template-columns: 88px 1fr;
+  gap: 4px 8px;
+  align-items: center;
+  font-size: 11px;
+}
+
+.prop-grid label,
+.kv-grid > span:first-child,
+.kv-grid > span:nth-child(odd) {
+  color: var(--text-faint);
+}
+
+.kv-grid {
+  grid-template-columns: 1fr auto;
+}
+
+/* ---- 属性面板：可编辑参数 ------------------------------------------------
+ * 每个参数都是一行「标签 + 控件」。派生量（由其它参数算出）在标签上点一个 ·
+ * 并在 title 里写明反解规则 —— 它们同样可改，但改的其实是背后那个真正的自由度，
+ * 这一点必须在界面上说出来，否则用户会以为半径和面积是两个独立参数。
+ */
+
+.prop-label.derived {
+  font-style: italic;
+}
+
+.derived-mark {
+  margin-left: 3px;
+  color: var(--accent-dim);
+  font-weight: 700;
+}
+
+.num-row,
+.bool-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+}
+
+.num-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* 数字右对齐 + 等宽数字：一列尺寸读起来才能上下对齐 */
+.num-input {
+  width: 100%;
+  min-width: 0;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.num-unit {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.vec2-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.vec2-row > .num-wrap {
+  flex: 1 1 0;
+}
+
+.inherit-btn {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 10px;
+  line-height: 1.5;
+  cursor: pointer;
+}
+
+.inherit-btn:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* 已经是「随层」状态：不是按钮，点不动 */
+.inherit-on {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-faint);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+/* 多选时各项取值不一致 */
+.color-input.mixed {
+  border-style: dashed;
+}
+
+.multi-list,
+.entity-list,
+.hint-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  font-size: 11px;
+}
+
+.multi-list li,
+.entity-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 3px 5px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+
+.multi-list li:hover,
+.entity-list li:hover {
+  background: var(--bg-hover);
+}
+
+.hint-list li {
+  padding: 2px 0;
+  color: var(--text-dim);
+}
+
+.hint-list .mono {
+  color: var(--accent);
+  margin-right: 6px;
+}
+
+.type-breakdown {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-top: 8px;
+}
+
+.type-chip {
+  padding: 2px 7px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+
+.type-chip b {
+  color: var(--text);
+}
+
+.shortcut-table td {
+  padding: 2px 4px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.shortcut-table td.mono {
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+.entity-kind {
+  color: var(--text);
+}
+
+/* 约束列表里的一行：徽章 + 完整句子 + 删除。
+   删除是文字按钮而不是图标，因为它是列表里唯一的破坏性动作，需要能被读出来。 */
+.constraint-glyph {
+  display: inline-block;
+  min-width: 16px;
+  margin-right: 6px;
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 12px;
+  text-align: center;
+}
+
+.entity-list .link-btn {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  font-family: var(--sans);
+  font-size: 10.5px;
+  cursor: pointer;
+}
+
+.entity-list .link-btn:hover {
+  border-color: var(--danger, #c05050);
+  color: var(--text);
+}
+
+.wide-btn {
+  width: 100%;
+  margin-top: 6px;
+  padding: 4px 8px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-dim);
+  font-family: var(--sans);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.wide-btn:hover {
+  border-color: var(--border-strong);
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+/* ==========================================================================
+   Status area
+   ========================================================================== */
+
+.status-area {
+  flex: 0 0 auto;
+  background: var(--bg-panel);
+  border-top: 1px solid var(--border);
+}
+
+.cmd-log {
+  height: 48px;
+  overflow-y: auto;
+  padding: 4px 10px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-dim);
+  background: var(--bg-input);
+  border-bottom: 1px solid var(--border);
+}
+
+.log-line {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.log-line.err {
+  color: var(--danger);
+}
+
+.log-line.warn {
+  color: var(--warn);
+}
+
+.cmd-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.cmd-prompt {
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  white-space: nowrap;
+  max-width: 340px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.cmd-input {
+  flex: 1;
+  padding: 3px 7px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11.5px;
+  min-width: 0;
+}
+
+.cmd-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.status-bar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 8px;
+  font-size: 10.5px;
+  overflow-x: auto;
+  white-space: nowrap;
+}
+
+.status-chip {
+  padding: 2px 7px;
+  background: var(--bg-panel-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-dim);
+  font-size: 10.5px;
+  cursor: default;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+}
+
+button.status-chip {
+  cursor: pointer;
+}
+
+button.status-chip:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.status-chip.mono {
+  font-family: var(--mono);
+}
+
+.status-chip.accent {
+  color: var(--accent);
+  border-color: var(--accent-dim);
+  background: var(--accent-soft);
+}
+
+.status-chip.ok {
+  color: var(--ok);
+  border-color: var(--ok);
+}
+
+.status-chip.warn {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.status-spacer {
+  flex: 1 1 auto;
+}
+
+.inline-select {
+  background: transparent;
+  border: none;
+  color: inherit;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  cursor: pointer;
+  padding: 0;
+}
+
+.inline-select:focus {
+  outline: none;
+}
+
+/* ==========================================================================
+   Scrollbars
+   ========================================================================== */
+
+::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 5px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--text-faint);
+  background-clip: content-box;
+}
+
+/* ==========================================================================
+   Datum panel (基准面 / 参考坐标系)
+   ========================================================================== */
+
+.datum-list li {
+  align-items: center;
+  gap: 6px;
+  cursor: default;
+}
+
+/* The active sketch plane is the one fact this list exists to show. */
+.datum-list li.datum-active {
+  background: var(--accent-soft);
+}
+
+/* The plane's *name* is the button that activates it — that is the action you
+   opened the panel for, so the label itself carries the click, and a separate
+   "设为活动" chip would only be a second way to read the same row. */
+.datum-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 11.5px;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.datum-name:hover {
+  color: var(--accent);
+}
+
+.datum-name.static {
+  color: var(--text-dim);
+  cursor: default;
+}
+
+.datum-badge {
+  flex: 0 0 auto;
+  min-width: 22px;
+  color: var(--accent);
+  font-size: 10px;
+  text-align: right;
+}
+
+/* ---- 基准面创建（选坐标平面 → 沿法线偏移） -------------------------------- */
+
+.datum-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0;
+}
+
+.chip {
+  flex: 1 1 0;
+  padding: 4px 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.chip:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.chip.active {
+  color: var(--accent);
+  border-color: var(--accent-dim);
+  background: var(--accent-soft);
+}
+
+.datum-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-input);
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11.5px;
+}
+
+.datum-input:focus {
+  outline: none;
+  border-color: var(--accent-dim);
+}
+
+.wide-btn.slim {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+}
+
+.wide-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}

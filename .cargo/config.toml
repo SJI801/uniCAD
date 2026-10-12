@@ -1,0 +1,46 @@
+# uniCAD — Cargo 配置
+# ===================
+#
+# 背景：本机没有安装 Visual Studio C++ 生成工具，且 Git Bash 自带的 GNU
+# `link.exe`（coreutils 的 link）会遮蔽 MSVC 的链接器。任何需要 host 端
+# build-script 的 crate（proc-macro2、quote、rustversion、wasm-bindgen-shared
+# 等）都会因为找不到可用链接器而报错：
+#
+#   link: extra operand '....rcgu.o'
+#   Try 'link --help' for more information.
+#
+# 解决方案：本机在 C:\ProgramData\mingw64\mingw64 安装了完整的 MinGW-w64
+# GCC 16.1，因此让 **host 端 ABI 走 GNU**：build-script 用 GCC 链接。wasm32
+# 目标本身不需要 C 链接器，所以内核依旧编译成干净的 WebAssembly。
+#
+# 关键点：`[target.x86_64-pc-windows-gnu].linker` 只在 host 三元组确实为
+# `x86_64-pc-windows-gnu` 时才生效。为此需要：
+#   1. 安装 GNU 工具链（host = x86_64-pc-windows-gnu）：
+#        rustup toolchain install stable-x86_64-pc-windows-gnu --profile minimal
+#   2. 为该工具链添加 wasm 目标：
+#        rustup target add wasm32-unknown-unknown --toolchain stable-x86_64-pc-windows-gnu
+#   3. 用该工具链构建（scripts/build-wasm.mjs 会自动这么做）：
+#        rustup run stable-x86_64-pc-windows-gnu cargo build --target wasm32-unknown-unknown
+#
+# 注意 rustup 的 self-update 有时会让安装看起来"成功"但实际没有落地
+# （报 `could not remove 'rustup-bin' file: 拒绝访问`）。若遇到，加
+# `RUSTUP_NO_SELF_UPDATE=1` 再装一次。
+#
+# 若日后安装了 VS Build Tools 想切回 MSVC ABI：删除本文件即可。
+
+[build]
+# 默认构建目标：WASM 内核，这样 `cargo build` 不需要额外参数。
+target = "wasm32-unknown-unknown"
+
+[target.x86_64-pc-windows-gnu]
+linker = "C:/ProgramData/mingw64/mingw64/bin/gcc.exe"
+ar = "C:/ProgramData/mingw64/mingw64/bin/ar.exe"
+
+# 兜底：万一 cargo 仍把某个 host 组件解析为 MSVC，也强制用 GCC，
+# 避免落到 Git Bash 那个坏掉的 link.exe 上。
+[target.x86_64-pc-windows-msvc]
+linker = "C:/ProgramData/mingw64/mingw64/bin/gcc.exe"
+ar = "C:/ProgramData/mingw64/mingw64/bin/ar.exe"
+
+[net]
+git-fetch-with-cli = true

@@ -1,0 +1,21 @@
+node_modules
+dist
+dist-ssr
+*.local
+.DS_Store
+.vite
+
+# Rust / WASM build artifacts
+kernel/target
+src/wasm/pkg
+
+# 验证脚本的输出
+canvas-shot.png
+canvas-zoom.png
+ribbon-collapsed.png
+ribbon-expanded.png
+ribbon-menu.png
+dims-live.png
+dims-selected.png
+props-panel.png
+canvas-dash-zoom.png
