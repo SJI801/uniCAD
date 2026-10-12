@@ -430,6 +430,40 @@ export function constraintPointAt(
 }
 
 /** Human-readable entity kind, used in panels, tooltips and constraint labels. */
+/**
+ * 把命名点搬回 `at`——距离类约束的「圆心钉扎」用：拖动圆心所在实体时，
+ * 被钉点必须留在原位（曲线绕它拉伸/转动），圆心永不移动。
+ *
+ * 返回 `null` 表示该命名点不是直接存储的坐标（弧的端点由圆心+角度导出），
+ * 无法直接钉，调用方跳过。
+ */
+export function pinNamedPoint(
+  e: Entity,
+  point: ConstraintPointKind,
+  index: number,
+  at: Vec2,
+): Entity | null {
+  switch (e.type) {
+    case 'line':
+      if (point === 'start') return { ...e, a: at };
+      if (point === 'end') return { ...e, b: at };
+      return null;
+    case 'circle':
+      return point === 'center' ? { ...e, center: at } : null;
+    case 'ellipse':
+      return point === 'center' ? { ...e, center: at } : null;
+    case 'polyline':
+      if (point === 'vertex' && e.points[index]) {
+        const points = e.points.slice();
+        points[index] = at;
+        return { ...e, points };
+      }
+      return null;
+    default:
+      return null;
+  }
+}
+
 export function describeEntity(e: Entity): string {
   switch (e.type) {
     case 'line':

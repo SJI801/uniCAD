@@ -12,7 +12,7 @@
  * goes to the DOM rather than the GPU.
  */
 
-import type { Vec2 } from '../core/types';
+import type { Entity, Vec2 } from '../core/types';
 import { UI_COLORS } from './style';
 
 export interface OverlaySegment {
@@ -118,6 +118,46 @@ export function snapMarker(point: Vec2, kind: string, sizePx: number): OverlayPo
     default:
       return [{ x: point.x, y: point.y, color: UI_COLORS.snapMarker, size: sizePx, shape: 'square' }];
   }
+}
+
+/**
+ * 起点/终点标色：绿点 = 图元起点，红点 = 终点。
+ *
+ * 只画有方向语义的图元——直线两端、圆弧两端、多段线首末顶点；圆和椭圆的
+ * 参数化起点没有几何意义，跳过。闭合多段线首尾重合，只画绿点。
+ */
+export function endpointMarkers(entities: readonly Entity[], sizePx: number): OverlayPoint[] {
+  const out: OverlayPoint[] = [];
+  for (const e of entities) {
+    switch (e.type) {
+      case 'line':
+        out.push({ x: e.a.x, y: e.a.y, color: UI_COLORS.endpointStart, size: sizePx, shape: 'circle' });
+        out.push({ x: e.b.x, y: e.b.y, color: UI_COLORS.endpointEnd, size: sizePx, shape: 'circle' });
+        break;
+      case 'arc': {
+        const sx = e.center.x + e.radius * Math.cos(e.startAngle);
+        const sy = e.center.y + e.radius * Math.sin(e.startAngle);
+        const tx = e.center.x + e.radius * Math.cos(e.endAngle);
+        const ty = e.center.y + e.radius * Math.sin(e.endAngle);
+        out.push({ x: sx, y: sy, color: UI_COLORS.endpointStart, size: sizePx, shape: 'circle' });
+        out.push({ x: tx, y: ty, color: UI_COLORS.endpointEnd, size: sizePx, shape: 'circle' });
+        break;
+      }
+      case 'polyline': {
+        const first = e.points[0];
+        const last = e.points[e.points.length - 1];
+        if (!first || !last) break;
+        out.push({ x: first.x, y: first.y, color: UI_COLORS.endpointStart, size: sizePx, shape: 'circle' });
+        if (!e.closed) {
+          out.push({ x: last.x, y: last.y, color: UI_COLORS.endpointEnd, size: sizePx, shape: 'circle' });
+        }
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  return out;
 }
 
 /** Grip handles at an entity's defining points, when it is selected. */

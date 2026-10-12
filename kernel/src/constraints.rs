@@ -102,6 +102,13 @@ pub enum ConstraintKind {
     Radius,
     /// A circle/arc has exactly the target diameter.
     Diameter,
+    /// Horizontal distance: |p.x − q.x| equals the target, with the left/right
+    /// relationship frozen from the initial configuration. y is free — this is
+    /// the AutoCAD "horizontal dimension" semantics the point-to-point
+    /// Distance kind deliberately lacks.
+    DistanceX,
+    /// Vertical distance: |p.y − q.y| equals the target, x free.
+    DistanceY,
 }
 
 impl ConstraintKind {
@@ -122,6 +129,8 @@ impl ConstraintKind {
             10 => Some(ConstraintKind::Angle),
             11 => Some(ConstraintKind::Radius),
             12 => Some(ConstraintKind::Diameter),
+            13 => Some(ConstraintKind::DistanceX),
+            14 => Some(ConstraintKind::DistanceY),
             _ => None,
         }
     }
@@ -143,6 +152,8 @@ impl ConstraintKind {
                 | ConstraintKind::Angle
                 | ConstraintKind::Radius
                 | ConstraintKind::Diameter
+                | ConstraintKind::DistanceX
+                | ConstraintKind::DistanceY
         )
     }
 }
@@ -450,6 +461,10 @@ struct Branch {
     /// supplementary angles; re-deciding per evaluation would make the
     /// residual jump by `2·value` whenever a direction flipped.
     angle_sign: f64,
+    /// Left/right (or above/below) relationship for the axis-aligned
+    /// distances: `+1` keeps `p` on the positive side of `q`, `-1` the
+    /// negative. Froze the same way as `tangent_side`.
+    axis_sign: f64,
 }
 
 fn plan_branch(prims: &[Prim], c: &Constraint) -> Branch {
@@ -458,6 +473,7 @@ fn plan_branch(prims: &[Prim], c: &Constraint) -> Branch {
         tangent_internal: false,
         distance_side: 1.0,
         angle_sign: 1.0,
+        axis_sign: 1.0,
     };
     let b = match c.b {
         Some(b) => b,
@@ -491,6 +507,21 @@ fn plan_branch(prims: &[Prim], c: &Constraint) -> Branch {
                     if l.dir().cross(pt - l.a) < 0.0 {
                         br.distance_side = -1.0;
                     }
+                }
+            }
+        }
+        ConstraintKind::DistanceX | ConstraintKind::DistanceY => {
+            // Freeze which side of q the point p starts on, so the residual
+            // stays the *signed* axis gap minus `sign·value` — smooth, same
+            // shape as the point-line distance.
+            if let (Some(p), Some(q)) = (point_of(pa, c.a), point_of(pb, b)) {
+                let d = if c.kind == ConstraintKind::DistanceX {
+                    p.x - q.x
+                } else {
+                    p.y - q.y
+                };
+                if d < 0.0 {
+                    br.axis_sign = -1.0;
                 }
             }
         }
@@ -567,6 +598,9 @@ fn is_valid(prims: &[Prim], c: &Constraint) -> bool {
             }
         }
         ConstraintKind::Angle => line_of(pa).is_some() && line_of(pb).is_some(),
+        ConstraintKind::DistanceX | ConstraintKind::DistanceY => {
+            point_of(pa, c.a).is_some() && point_of(pb, b).is_some()
+        }
         // Unreachable: handled in the `b: None` arm above, but the match must
         // stay exhaustive.
         ConstraintKind::Radius | ConstraintKind::Diameter => false,
@@ -739,6 +773,31 @@ fn residuals_of(prims: &[Prim], c: &Constraint, br: Branch, out: &mut Vec<f64>) 
                     // in radians means nothing to a millimetre.
                     let scale = 0.5 * (la.length() + lb.length());
                     out.push((signed - br.angle_sign * target) * scale);
+                }
+                _ => out.push(0.0),
+            }
+        }
+
+        ConstraintKind::DistanceX | ConstraintKind::DistanceY => {
+            match (point_of(pa, c.a), pb) {
+                (Some(p), Some(q)) => {
+                    let b_point =
+                        c.b.and_then(|bt| if bt.has_point() { point_of(q, bt) } else { None });
+                    if let Some(qp) = b_point {
+                        // Signed axis gap minus the frozen-side target. The
+                        // residual is *linear* in the coordinates — no `length`
+                        // singularity, and the free axis (y for DistanceX) has
+                        // zero gradient, which is exactly the "that axis is
+                        // unconstrained" semantics.
+                        let d = if c.kind == ConstraintKind::DistanceX {
+                            p.x - qp.x
+                        } else {
+                            p.y - qp.y
+                        };
+                        out.push(d - br.axis_sign * c.value);
+                    } else {
+                        out.push(0.0);
+                    }
                 }
                 _ => out.push(0.0),
             }
@@ -962,11 +1021,31 @@ pub fn solve(prims: &[Prim], moving: &[bool], raw: &[Constraint]) -> Outcome {
         for _ in 0..MAX_BACKTRACK {
             let mut a_mat = h.clone();
             for i in 0..nf {
-                // Marquardt scaling: damping proportional to each variable's own
-                // curvature, otherwise a radius and a coordinate get wildly
-                // different effective damping.
-                let d = a_mat[i * nf + i].abs().max(1e-9);
-                a_mat[i * nf + i] += lambda * d;
+                // **Levenberg damping: `JᵀJ + λI`** — deliberately *not*
+                // Marquardt's `JᵀJ + λ·diag(JᵀJ)`.
+                //
+                // The Jacobian here is routinely rank-deficient: one residual
+                // against four free variables is the normal case (a distance
+                // pins one point of a line; that line's other three parameters,
+                // and the *tangential* slide along the constraint, are all null
+                // directions). `diag(JᵀJ)` scaling is not isotropic, so the
+                // null-space component of the step works out to
+                // `−((D·u)·v)/((D·v)·v) · α` — **independent of λ**. It does not
+                // vanish as λ→0. The solver therefore slid geometry *along* the
+                // constraint instead of taking the shortest step: dragging one
+                // line of a `距离` pair by ~90 units threw its pinned point 35
+                // units sideways around the solution circle, the trial
+                // frequently failed to reduce the residual, λ was driven up by
+                // backtracking, and the solve either crawled for all 80
+                // iterations or gave up with the constraint violated.
+                //
+                // `λI` *is* isotropic, so the null-space right-hand side `g·v`
+                // is exactly zero: the step is the minimum-norm one and the
+                // freedom the user did not touch stays where it was — the
+                // contract the module doc claims. The old `.max(1e-9)` floor
+                // existed only to keep a zero curvature from making the matrix
+                // singular; λ itself now does that.
+                a_mat[i * nf + i] += lambda;
             }
             for i in 0..nf {
                 dx[i] = -g[i];
@@ -1132,6 +1211,72 @@ mod tests {
         match &out.prims[0] {
             Prim::Line(la) => assert_eq!(la.a, Vec2::new(0.0, 0.0)),
             _ => panic!("line"),
+        }
+    }
+
+    /// 水平距离：竖直拖走 B（y 任意），x 间距仍被拉回目标值——
+    /// 这正是点-点直线距离管不到的语义。
+    #[test]
+    fn distance_x_pulls_only_the_axis_gap() {
+        let a = LineSeg::new(Vec2::new(0.0, 0.0), Vec2::new(50.0, 0.0));
+        // B 被拖到右上方：x 间距 60，y 错开 40。
+        let b = LineSeg::new(Vec2::new(110.0, 40.0), Vec2::new(160.0, 40.0));
+        let c = Constraint {
+            kind: ConstraintKind::DistanceX,
+            a: Target { entity: 0, point_kind: PT_END, point_index: 0 },
+            b: Some(Target { entity: 1, point_kind: PT_START, point_index: 0 }),
+            value: 80.0,
+        };
+        let out = solve(&[Prim::Line(a), Prim::Line(b)], &[false, true], &[c]);
+        assert!(out.converged, "max residual = {}", out.max_residual);
+        match &out.prims[1] {
+            Prim::Line(lb) => {
+                let dx = lb.a.x - 50.0;
+                assert!((dx - 80.0).abs() < 1e-6, "dx = {dx}");
+                // y 完全自由：保持在拖到的位置。
+                assert!((lb.a.y - 40.0).abs() < 1e-6, "y = {}", lb.a.y);
+            }
+            _ => panic!("line"),
+        }
+    }
+
+    /// 拖远之后必须解回圆上，而且必须落在**圆周上离被拖点最近的那一点**
+    /// （最小位移）——修复前这里约半数方向解不回去：
+    /// LM 的 `diag(JᵀJ)` 各向异性阻尼让步长的零空间分量与 λ 无关，
+    /// 点会被沿约束切向甩出 20~35 个单位，试步降不下残差 → 80 次迭代爬不完。
+    #[test]
+    fn distance_recovers_from_a_far_drag_in_every_direction() {
+        let r0 = (80.0f64 * 80.0 + 40.0 * 40.0).sqrt();
+        for k in 0..72 {
+            let deg = k as f64 * 5.0;
+            let th = deg.to_radians();
+            let anchor = Vec2::new(50.0, 0.0);
+            let q = Vec2::new(anchor.x + r0 * th.cos(), r0 * th.sin());
+            let a = LineSeg::new(Vec2::new(0.0, 0.0), anchor);
+            let b = LineSeg::new(q, q + Vec2::new(50.0, 0.0));
+            let c = Constraint {
+                kind: ConstraintKind::Distance,
+                a: Target { entity: 0, point_kind: PT_END, point_index: 0 },
+                b: Some(Target { entity: 1, point_kind: PT_START, point_index: 0 }),
+                value: 50.0,
+            };
+            let out = solve(&[Prim::Line(a), Prim::Line(b)], &[false, true], &[c]);
+            let got = match &out.prims[1] {
+                Prim::Line(l) => l.a,
+                _ => panic!("line"),
+            };
+            let d = (got - anchor).length();
+            assert!(
+                out.converged && (d - 50.0).abs() < 1e-6,
+                "deg={deg}: dist={d} resid={} iters={}",
+                out.max_residual,
+                out.iterations
+            );
+            // 最小位移：落点 = 圆心 + 50·(被拖方向单位向量)，不许沿圆滑走。
+            let u = (q - anchor) / r0;
+            let want = anchor + u * 50.0;
+            let slid = (got - want).length();
+            assert!(slid < 1e-6, "deg={deg}: slid {slid} along the circle");
         }
     }
 

@@ -72,6 +72,8 @@ export const CONSTRAINT_LABEL: Record<ConstraintKind, string> = {
   angle: '角度',
   radius: '半径',
   diameter: '直径',
+  distanceX: '水平距离',
+  distanceY: '竖直距离',
 };
 
 /**
@@ -96,6 +98,8 @@ export const CONSTRAINT_GLYPH: Record<ConstraintKind, string> = {
   angle: '∠',
   radius: 'R',
   diameter: 'Ø',
+  distanceX: 'H',
+  distanceY: 'V',
 };
 
 /** Menu order: the ones people reach for first. */
@@ -113,6 +117,8 @@ export const CONSTRAINT_ORDER: readonly ConstraintKind[] = [
   'angle',
   'radius',
   'diameter',
+  'distanceX',
+  'distanceY',
 ];
 
 /**
@@ -125,6 +131,28 @@ export const DIMENSIONAL_CONSTRAINTS: ReadonlySet<ConstraintKind> = new Set<Cons
   'angle',
   'radius',
   'diameter',
+  'distanceX',
+  'distanceY',
+]);
+
+/**
+ * Dimensional kinds whose target **may legitimately be zero**.
+ *
+ * `distance` = 0 is 重合, `distanceX` / `distanceY` = 0 is 对齐 on that axis —
+ * all three are things a drafter asks for on purpose, and `buildConstraints`
+ * seeds exactly those values when the two picked points already share a
+ * coordinate. A radius or an angle of 0 is not geometry at all, so those stay
+ * strictly positive.
+ *
+ * This set exists because three separate layers were rejecting the value:
+ * the JSON reader (dropped the whole constraint on load), the panel's inline
+ * number box, and `setConstraintValueAction`. Keeping the policy in one place
+ * is what stops them drifting apart again.
+ */
+export const ZERO_VALUE_DIMENSIONS: ReadonlySet<ConstraintKind> = new Set<ConstraintKind>([
+  'distance',
+  'distanceX',
+  'distanceY',
 ]);
 
 export const POINT_LABEL: Record<ConstraintPointKind, string> = {
@@ -251,9 +279,11 @@ export function canApply(kind: ConstraintKind, entities: readonly Entity[]): App
       }
       return { ok: true };
     }
-    case 'distance': {
+    case 'distance':
+    case 'distanceX':
+    case 'distanceY': {
       if (!firstNamedPoint(a) || !firstNamedPoint(b)) {
-        return { ok: false, reason: '距离需要两个可命名点的对象（圆/椭圆只有圆心）' };
+        return { ok: false, reason: '距离约束需要两个可命名点的对象（圆/椭圆只有圆心）' };
       }
       return { ok: true };
     }
@@ -442,9 +472,20 @@ export function buildConstraints(kind: ConstraintKind, entities: readonly Entity
   // 距离：两点尺寸，值 = 当前最近点对距离。内核只认「点到点」和「点到线」，
   // 两条整线之间「距离」无定义（相交处处为零、错开又歧义），所以前端把
   // 尺寸钉在具体的一对点上。
-  if (kind === 'distance') {
+  // 距离三兄弟：直线距离 / 水平距离（锁 x）/ 竖直距离（锁 y）。种子值取
+  // 当前几何的对应量——建约束即「锁定现状」，改值才驱动。
+  if (kind === 'distance' || kind === 'distanceX' || kind === 'distanceY') {
     const pair = closestPair(a, b);
     if (!pair) return { reason: '这两个对象上没有可用的点' };
+    const p = constraintPointAt(a, pair.pa.point, pair.pa.index ?? 0);
+    const q = constraintPointAt(b, pair.pb.point, pair.pb.index ?? 0);
+    if (!p || !q) return { reason: '这两个对象上没有可用的点' };
+    const value =
+      kind === 'distance'
+        ? pair.distance
+        : kind === 'distanceX'
+          ? Math.abs(p.x - q.x)
+          : Math.abs(p.y - q.y);
     return {
       constraints: [
         {
@@ -452,7 +493,7 @@ export function buildConstraints(kind: ConstraintKind, entities: readonly Entity
           kind,
           a: target(a.id, pair.pa),
           b: target(b.id, pair.pb),
-          value: pair.distance,
+          value,
         },
       ],
     };
@@ -632,11 +673,19 @@ function applySolved(e: Entity, buf: Float64Array): Entity | null {
         rotation: buf[5]!,
       };
     case 'polyline': {
-      const count = Math.floor((buf.length - 2) / 2);
+      // Wire layout is `[tag, closed, vertexCount, x, y, …]` — the vertex count
+      // at `buf[2]` is a *slot*, not a coordinate. Reading the points from
+      // `buf[2]` shifted every coordinate by one number (the count became the
+      // first x, and the last y was dropped), so any solve that moved a
+      // polyline wrote nonsense geometry back into the document. Same layout as
+      // `decodePrimitive` and the kernel's `decode_prim`.
+      const declared = Number.isFinite(buf[2]) ? Math.floor(buf[2]!) : 0;
+      const available = Math.floor((buf.length - 3) / 2);
+      const count = Math.min(declared, available);
       if (count < 2) return null;
       const points: Vec2[] = [];
       for (let i = 0; i < count; i++) {
-        points.push({ x: buf[2 + i * 2]!, y: buf[3 + i * 2]! });
+        points.push({ x: buf[3 + i * 2]!, y: buf[4 + i * 2]! });
       }
       return { ...e, points, closed: buf[1] !== 0 };
     }

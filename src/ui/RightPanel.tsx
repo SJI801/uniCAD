@@ -8,7 +8,12 @@ import { useEditor, selectedEntities } from '../state/editorStore';
 import { fmt, fmtAngle, type Constraint } from '../core/types';
 import { measureEntity, isKernelReady } from '../core/kernel';
 import { describeEntity } from '../core/entities';
-import { CONSTRAINT_GLYPH, describeConstraint, DIMENSIONAL_CONSTRAINTS } from '../core/constraints';
+import {
+  CONSTRAINT_GLYPH,
+  describeConstraint,
+  DIMENSIONAL_CONSTRAINTS,
+  ZERO_VALUE_DIMENSIONS,
+} from '../core/constraints';
 
 export default function RightPanel(): React.ReactElement {
   const selection = useEditor((s) => s.selection);
@@ -224,6 +229,8 @@ function DimValueInput({
   onCommit: (v: number) => void;
 }) {
   const isAngle = constraint.kind === 'angle';
+  // 距离三兄弟的 0 是「重合 / 对齐」，允许输入；半径/角度仍是严格正数。
+  const mayBeZero = ZERO_VALUE_DIMENSIONS.has(constraint.kind);
   const current = constraint.value ?? 0;
   const display = isAngle
     ? String(Number(((current * 180) / Math.PI).toFixed(1)))
@@ -235,7 +242,7 @@ function DimValueInput({
     setDraft(null);
     if (raw === '') return;
     const n = Number(raw);
-    if (!Number.isFinite(n) || n <= 0) return;
+    if (!Number.isFinite(n) || (mayBeZero ? n < 0 : n <= 0)) return;
     onCommit(isAngle ? (n * Math.PI) / 180 : n);
   };
   return (

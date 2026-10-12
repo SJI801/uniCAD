@@ -51,7 +51,7 @@ import {
 } from '../core/history';
 import { XY_PLANE, planeNormal } from '../core/types';
 import type { DocFrame, DocPlane, PlaneId } from '../core/types';
-import { cloneEntity, geometryEquals, isPickable, newLayerId } from '../core/entities';
+import { cloneEntity, geometryEquals, isPickable, newLayerId, constraintPointAt, pinNamedPoint } from '../core/entities';
 import { splitCommand, splitEntities, splitTargets } from '../core/split';
 import {
   CONSTRAINT_LABEL,
@@ -59,6 +59,7 @@ import {
   constraintsForEntity,
   solveConstraints,
   DIMENSIONAL_CONSTRAINTS,
+  ZERO_VALUE_DIMENSIONS,
 } from '../core/constraints';
 import { deserializeDocument, serializeDocument, type LoadResult } from '../io/json';
 
@@ -153,6 +154,8 @@ export interface EditorState {
    * wants one without the other.
    */
   constraintsVisible: boolean;
+  /** 起点/终点标色小圆点（绿=起，红=终）。 */
+  endpointsVisible: boolean;
   /**
    * Whether the top ribbon is folded down to a single compact row.
    *
@@ -227,6 +230,8 @@ export interface EditorState {
   toggleDims(): void;
   setConstraintsVisible(visible: boolean): void;
   toggleConstraints(): void;
+  setEndpointsVisible(visible: boolean): void;
+  toggleEndpoints(): void;
   setRibbonCollapsed(collapsed: boolean): void;
   toggleRibbon(): void;
 
@@ -297,6 +302,7 @@ const MAX_LOG = 200;
  */
 const RIBBON_COLLAPSED_KEY = 'unicad.ui.ribbonCollapsed';
 const CONSTRAINTS_VISIBLE_KEY = 'unicad.ui.constraintsVisible';
+const ENDPOINTS_VISIBLE_KEY = 'unicad.ui.endpointsVisible';
 
 /**
  * Viewport width below which a first-time visitor gets the folded ribbon.
@@ -374,6 +380,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   gridVisible: true,
   dimsVisible: true,
   constraintsVisible: readUiFlag(CONSTRAINTS_VISIBLE_KEY, true),
+  endpointsVisible: readUiFlag(ENDPOINTS_VISIBLE_KEY, true),
   ribbonCollapsed: readUiFlag(
     RIBBON_COLLAPSED_KEY,
     window.innerWidth < RIBBON_AUTO_COLLAPSE_BELOW,
@@ -537,6 +544,7 @@ export const useEditor = create<EditorState>((set, get) => ({
 
     // 改属性时**只放开伙伴**。把被编辑对象也放开，求解器会用「把半径改回去」
     // 来满足相切 —— 用户刚做的修改当场被撤销，看起来像输入框不生效。
+    // 同理不要钉扎 a 端命名点：那也会把用户刚敲的长度/角度还原（见 withConstraintRepair）。
     const moving = new Set<EntityId>();
     for (const c of constraintsForEntity(doc, id)) {
       moving.add(c.a.entity);
@@ -544,7 +552,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     }
     moving.delete(id);
 
-    const patches = withConstraintRepair(doc, [after], [...moving], label);
+    const patches = withConstraintRepair(doc, [after], [...moving], label, false);
     if (patches.length === 0) return;
     get().run(command(label, ...patches));
   },
@@ -590,8 +598,10 @@ export const useEditor = create<EditorState>((set, get) => ({
     const target = doc.constraints.find((c) => c.id === id);
     // 只有尺寸约束有「值」可改；几何关系（相切/平行…）直接忽略。
     if (!target || !DIMENSIONAL_CONSTRAINTS.has(target.kind)) return;
-    if (!Number.isFinite(value) || value <= 0) {
-      get().pushLog('尺寸必须大于 0');
+    // 距离三兄弟的 0 是「重合 / 对齐」，是合法目标值；半径/角度才必须为正。
+    const mayBeZero = ZERO_VALUE_DIMENSIONS.has(target.kind);
+    if (!Number.isFinite(value) || (mayBeZero ? value < 0 : value <= 0)) {
+      get().pushLog(mayBeZero ? '尺寸不能为负数' : '尺寸必须大于 0');
       return;
     }
     if (Math.abs((target.value ?? 0) - value) < 1e-9) return;
@@ -604,8 +614,9 @@ export const useEditor = create<EditorState>((set, get) => ({
       ...doc,
       constraints: doc.constraints.map((c) => (c.id === id ? after : c)),
     };
-    const moving: EntityId[] = [target.a.entity];
-    if (target.b) moving.push(target.b.entity);
+    // 只放开滑动端（b 端）：a 端是圆心，方向性语义下圆心钉死不动——半径
+    // 的变化全部由 b 端吸收。半径/直径无 b 端，放开圆自身。
+    const moving: EntityId[] = target.b ? [target.b.entity] : [target.a.entity];
 
     const patches: Patch[] = [updateConstraint(target, after)];
     for (const solved of solveConstraints(shadow, moving)) {
@@ -960,6 +971,17 @@ export const useEditor = create<EditorState>((set, get) => ({
     get().pushLog(visible ? '约束标记: 显示' : '约束标记: 隐藏');
   },
 
+  setEndpointsVisible(visible) {
+    writeUiFlag(ENDPOINTS_VISIBLE_KEY, visible);
+    set({ endpointsVisible: visible });
+  },
+
+  toggleEndpoints() {
+    const visible = !get().endpointsVisible;
+    get().setEndpointsVisible(visible);
+    get().pushLog(visible ? '端点标色: 显示' : '端点标色: 隐藏');
+  },
+
   setRibbonCollapsed(collapsed) {
     writeUiFlag(RIBBON_COLLAPSED_KEY, collapsed);
     set({ ribbonCollapsed: collapsed });
@@ -1230,22 +1252,57 @@ function solveAfterEdit(
  * the final geometry.
  *
  * Labels starting with `__` are live previews (see `CanvasView`'s drag handling:
- * `__live_move` / `__revert_live_move`), which run once per frame. Solving there
- * would put an LM iteration loop inside the frame budget for no visible gain,
- * because the release commits a real command that does get solved. So previews
- * skip the repair and snap onto the constraint when the drag ends.
+ * `__live_move` / `__revert_live_move`), which run once per frame. `__live_move`
+ * **is solved** — that is what makes the constraint follow the cursor during a
+ * drag instead of snapping only on release (the systems here are tiny, so an LM
+ * solve per frame is cheap). `__revert_live_move` and tool previews skip the
+ * repair: reverting restores the pre-drag geometry and previews must not touch
+ * the document at all.
  */
 function withConstraintRepair(
   doc: CadDocument,
   edits: readonly Entity[],
   moving: readonly EntityId[],
   label: string,
+  pinAnchor = true,
 ): Patch[] {
-  const finalById = new Map<EntityId, Entity>();
-  for (const e of edits) finalById.set(e.id, e);
+  // 距离类约束的 a 端是圆心：拖动圆心所在实体时，把被钉点按回原位——
+  // 「以第一个曲线终点为圆心」意味着圆心永不移动，曲线绕它拉伸/转动。
+  // （弧的端点由圆心+角度导出，无法直接钉，暂不处理。）
+  //
+  // 两个例外，都是「钉扎会把用户自己的编辑吃掉」的情形：
+  //
+  // * **圆 / 椭圆**：圆心是它们**唯一**的命名点，把它钉回去等于整条曲线原地
+  //   不动（残差本来就已满足，求解器也不会再动它）——用户看到的是「这个圆
+  //   拖不动」。这两种交给求解器把它拉回圆上，仍然满足距离。
+  // * **属性面板改值**（`pinAnchor = false`）：`updateEntityById` 走的是同一条
+  //   路，改「长度/角度」时若该图元是 a 端且被钉点是终点，钉扎会把刚改的值静默
+  //   还原，输入框看起来不生效。
+  const adjusted: Entity[] = edits.map((e) => {
+    if (!pinAnchor) return e;
+    if (e.type === 'circle' || e.type === 'ellipse') return e;
+    for (const c of doc.constraints) {
+      if (c.a.entity !== e.id) continue;
+      if (c.kind !== 'distance' && c.kind !== 'distanceX' && c.kind !== 'distanceY') continue;
+      if (!c.b) continue;
+      const owner = doc.entities.find((x) => x.id === c.a.entity);
+      if (!owner) continue;
+      const at = constraintPointAt(owner, c.a.point, c.a.index ?? 0);
+      if (!at) continue;
+      const pinnedEntity = pinNamedPoint(e, c.a.point, c.a.index ?? 0, at);
+      if (pinnedEntity) return pinnedEntity;
+      break;
+    }
+    return e;
+  });
 
-  if (!label.startsWith('__')) {
-    for (const solved of solveAfterEdit(doc, edits, moving)) finalById.set(solved.id, solved);
+  const finalById = new Map<EntityId, Entity>();
+  for (const e of adjusted) finalById.set(e.id, e);
+
+  // 实时拖动（__live_move）也解算：约束在拖动中就贴住几何，松手不再弹跳。
+  // 其余 __ 前缀（revert、工具预览）维持跳过——预览阶段不动文档几何。
+  if (label === '__live_move' || !label.startsWith('__')) {
+    for (const solved of solveAfterEdit(doc, adjusted, moving)) finalById.set(solved.id, solved);
   }
 
   const patches: Patch[] = [];

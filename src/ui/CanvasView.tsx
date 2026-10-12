@@ -16,6 +16,7 @@ import {
   selectionWindow,
   segmentsToVertices,
   snapMarker,
+  endpointMarkers,
   type OverlaySegment,
 } from '../render/overlay';
 import {
@@ -24,7 +25,7 @@ import {
   type DimContext,
   type DimLabel,
 } from '../render/dims';
-import { constraintBadges } from '../render/constraintMarks';
+import { constraintBadges, constraintGuides } from '../render/constraintMarks';
 import { useEditor } from '../state/editorStore';
 import {
   SceneBuffer,
@@ -1008,6 +1009,11 @@ export default function CanvasView(): React.ReactElement {
       // 标记尺寸统一用 CSS 像素：它们是给眼睛看的，不该随缩放变小。
       const markerPx = 7;
 
+      // 起点/终点标色：绿=起、红=终，帮用户看清方向与命名点位置。
+      if (state.endpointsVisible) {
+        overlayPoints.push(...endpointMarkers(visible, markerPx * 0.85));
+      }
+
       // Selection grips.
       for (const e of d.entities) {
         if (!state.selection.has(e.id)) continue;
@@ -1086,6 +1092,8 @@ export default function CanvasView(): React.ReactElement {
       }
 
       if (state.constraintsVisible) {
+        // 距离类约束的解空间引导：选中时画出点被钉住的圆/轴线。
+        overlaySegs.push(...constraintGuides(d, state.selection, visible));
         dimLabels.push(...constraintBadges(d, state.selection, visible, dimCtx));
       }
       syncDimLayer(dimLayerRef.current, dimLabels);

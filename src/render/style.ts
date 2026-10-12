@@ -27,6 +27,8 @@ export const UI_COLORS = {
   gripHot: '#ff5d5d',
   snapMarker: '#43d17c',
   snapMarkerAlt: '#3fd0d8',
+  endpointStart: '#4ade80',
+  endpointEnd: '#f87171',
   rubberBand: '#ffffff',
   selectionWindow: '#4ea3ff',
   selectionCrossing: '#3fd07a',

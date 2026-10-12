@@ -24,6 +24,8 @@ import type { CadDocument, Constraint, Entity, EntityId, Vec2 } from '../core/ty
 import { constraintPointAt, entityBoundsTS } from '../core/entities';
 import { CONSTRAINT_GLYPH, describeConstraint } from '../core/constraints';
 import type { DimContext, DimLabel } from './dims';
+import type { OverlaySegment } from './overlay';
+import { UI_COLORS } from './style';
 
 /**
  * How far the badge floats off its anchor, in screen pixels.
@@ -123,4 +125,89 @@ function badgeText(c: Constraint): string {
   return c.kind === 'angle'
     ? `${CONSTRAINT_GLYPH[c.kind]} ${((c.value * 180) / Math.PI).toFixed(1)}°`
     : `${CONSTRAINT_GLYPH[c.kind]} ${Number(c.value.toFixed(2))}`;
+}
+
+const GUIDE_ARC_SEGMENTS = 48;
+/** 轴向解空间虚线画多长（模型单位，以可动点为中心对称）。 */
+const GUIDE_REACH = 150;
+
+/**
+ * 解空间引导：选中挂着距离类约束的图元时，把「被钉住的范围」画出来。
+ *
+ * * `distance`（对齐）：以冻结端为圆心、目标值为半径的虚线圆——另一端被钉在
+ *   这个圆上，拖动只能沿圆滑。「距离不变但方向变了」的失效感由此消除。
+ * * `distanceX` / `distanceY`：过可动端的一条竖直/水平虚线——那个轴被锁死，
+ *   另一个轴自由。
+ *
+ * 基准端**永远是 a 端**（第一个曲线的被钉点）——「以第一个曲线终点为圆心」
+ * 是方向性语义，不随拖动对象切换；配合 `withConstraintRepair` 的圆心钉扎，
+ * 拖 a 端实体时圆心也不动（曲线绕它拉伸/转动）。跟随「约束标记」开关一起显隐。
+ */
+export function constraintGuides(
+  doc: CadDocument,
+  selected: ReadonlySet<EntityId>,
+  visible: readonly Entity[],
+): OverlaySegment[] {
+  if (selected.size === 0) return [];
+  const onVisibleLayer = new Set(visible.map((e) => e.id));
+  const segs: OverlaySegment[] = [];
+
+  for (const c of doc.constraints) {
+    if (c.kind !== 'distance' && c.kind !== 'distanceX' && c.kind !== 'distanceY') continue;
+    if (!c.b) continue;
+    const aSel = selected.has(c.a.entity);
+    const bSel = selected.has(c.b.entity);
+    if (!aSel && !bSel) continue;
+
+    // Property narrowing on `c.b` does not survive into an arrow-function
+    // callback, so hoist it before the `find` calls below.
+    const bTarget = c.b;
+    const ea = doc.entities.find((x) => x.id === c.a.entity);
+    const eb = doc.entities.find((x) => x.id === bTarget.entity);
+    if (!ea || !eb) continue;
+    if (!onVisibleLayer.has(ea.id) || !onVisibleLayer.has(eb.id)) continue;
+
+    const value = c.value ?? 0;
+    if (!(value > 0)) continue;
+
+    // 圆心永远 = a 端（第一个曲线的被钉点）；b 端是被钉在圆上滑的那个。
+    const anchorT = c.a;
+    const anchorE = ea;
+    const mobileT = c.b;
+    const mobileE = eb;
+    const anchor = constraintPointAt(anchorE, anchorT.point, anchorT.index ?? 0);
+    const mobile = constraintPointAt(mobileE, mobileT.point, mobileT.index ?? 0);
+    if (!anchor || !mobile) continue;
+
+    if (c.kind === 'distance') {
+      for (let i = 0; i < GUIDE_ARC_SEGMENTS; i++) {
+        const a1 = (i / GUIDE_ARC_SEGMENTS) * Math.PI * 2;
+        const a2 = ((i + 1) / GUIDE_ARC_SEGMENTS) * Math.PI * 2;
+        segs.push({
+          a: { x: anchor.x + value * Math.cos(a1), y: anchor.y + value * Math.sin(a1) },
+          b: { x: anchor.x + value * Math.cos(a2), y: anchor.y + value * Math.sin(a2) },
+          color: UI_COLORS.preview,
+          width: 1,
+          dash: [6, 4],
+        });
+      }
+    } else if (c.kind === 'distanceX') {
+      segs.push({
+        a: { x: mobile.x, y: mobile.y - GUIDE_REACH },
+        b: { x: mobile.x, y: mobile.y + GUIDE_REACH },
+        color: UI_COLORS.preview,
+        width: 1,
+        dash: [6, 4],
+      });
+    } else {
+      segs.push({
+        a: { x: mobile.x - GUIDE_REACH, y: mobile.y },
+        b: { x: mobile.x + GUIDE_REACH, y: mobile.y },
+        color: UI_COLORS.preview,
+        width: 1,
+        dash: [6, 4],
+      });
+    }
+  }
+  return segs;
 }

@@ -129,7 +129,9 @@ export type ConstraintKind =
   | 'distance'
   | 'angle'
   | 'radius'
-  | 'diameter';
+  | 'diameter'
+  | 'distanceX'
+  | 'distanceY';
 
 /** Which point of a curve a constraint refers to. `none` = the whole curve. */
 export type ConstraintPointKind = 'none' | 'start' | 'end' | 'center' | 'vertex';
@@ -183,6 +185,8 @@ export const CONSTRAINT_KIND_TAG: Record<ConstraintKind, number> = {
   angle: 10,
   radius: 11,
   diameter: 12,
+  distanceX: 13,
+  distanceY: 14,
 };
 
 /** Kernel wire tags for `ConstraintTarget.point`. */

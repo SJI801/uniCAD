@@ -80,6 +80,8 @@ export default function Ribbon(props: RibbonProps): React.ReactElement {
   const removeConstraintsForSelection = useEditor((s) => s.removeConstraintsForSelection);
   const constraintsVisible = useEditor((s) => s.constraintsVisible);
   const toggleConstraints = useEditor((s) => s.toggleConstraints);
+  const toggleEndpoints = useEditor((s) => s.toggleEndpoints);
+  const endpointsVisible = useEditor((s) => s.endpointsVisible);
 
   const activeOsnapMask = packOsnapMask(doc.settings.osnapModes);
 
@@ -528,6 +530,13 @@ export default function Ribbon(props: RibbonProps): React.ReactElement {
             title="显示/隐藏画布上的约束标记"
           >
             约束标记
+          </button>
+          <button
+            className={`tool-btn wide ${endpointsVisible ? 'active' : ''}`}
+            onClick={toggleEndpoints}
+            title="起点绿点 / 终点红点：显示图元方向"
+          >
+            端点标色
           </button>
         </div>
         <div className="ribbon-group-label">几何约束</div>
