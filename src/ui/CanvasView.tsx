@@ -523,6 +523,12 @@ export default function CanvasView(): React.ReactElement {
         }
         // Begin a move drag on the current selection set.
         const current = useEditor.getState();
+        // 完全定义模式：整张草图进入只读态——ROADMAP 0.4 的语义是「开启后
+        // 拖不动」，不挑图元（受不受约束都锁）。选中仍然允许（查看 + 改尺寸）。
+        if (current.fullyConstrained) {
+          pushLog('完全定义模式：拖动已锁定，请通过尺寸修改驱动');
+          return;
+        }
         const originals = current.doc.entities
           .filter((e) => current.selection.has(e.id))
           .map((e) => structuredClone(e));

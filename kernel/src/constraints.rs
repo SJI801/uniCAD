@@ -241,6 +241,22 @@ fn param_count(p: &Prim) -> usize {
     }
 }
 
+/// Which slots of a primitive's block are **defining sizes** rather than position
+/// or orientation — a circle's / arc's radius, an ellipse's semi-axes.
+///
+/// Offsets are relative to the primitive's own block and must match
+/// [`write_params`]. The distinction matters to the solver: a relationship may
+/// move and turn a curve, but it must not resize it — see `size_driven` in
+/// [`solve`].
+fn size_slots(p: &Prim) -> &'static [usize] {
+    match p {
+        Prim::Circle(_) => &[2],
+        Prim::Arc(_) => &[2],
+        Prim::Ellipse(_) => &[2, 3],
+        Prim::Line(_) | Prim::Polyline(_) => &[],
+    }
+}
+
 /// `p` → scalars, in the fixed order documented on [`param_count`].
 fn write_params(p: &Prim, out: &mut [f64]) {
     match p {
@@ -911,13 +927,43 @@ pub fn solve(prims: &[Prim], moving: &[bool], raw: &[Constraint]) -> Outcome {
     }
 
     let layout = Layout::new(prims);
+
+    // 半径 / 半轴这类**定义尺寸**只由尺寸约束驱动，绝不被关系约束顺手改掉。
+    //
+    // 相切残差里同时出现圆心、直线和半径（`cross(u, cen-a) - side*r`），所以
+    // 只要半径是自由变量，min-norm 步就会把它和位置**平摊**：圆心 (0,0) r=20 的
+    // 圆、右侧 x=30 的竖直线，点一次「相切」会解成 r=24 / 圆心 (4,0) / 线 x=28
+    // —— 数学上相切了，用户看到的是「圆被改了大小还挪了位置，线根本没过来」。
+    // 穿过圆心那种更夸张：r 直接 20 → 12。
+    //
+    // 这也不是「最小位移」该给的东西：模块文档承诺「没碰过的自由度原地不动」，
+    // 而用户点相切时没碰过半径。位置与朝向该动（关系就是关于它们的），尺寸不该动
+    // —— 想改尺寸就写尺寸约束（ROADMAP 0.1/0.2：尺寸是唯一能驱动尺寸参数的东西）。
+    let size_driven: Vec<bool> = (0..prims.len())
+        .map(|i| {
+            filtered.iter().any(|c| {
+                matches!(
+                    c.kind,
+                    ConstraintKind::Radius | ConstraintKind::Diameter | ConstraintKind::EqualRadius
+                ) && (c.a.entity == i || c.b.map_or(false, |b| b.entity == i))
+            })
+        })
+        .collect();
+
     let free: Vec<usize> = {
         let mut v = Vec::new();
         for (i, m) in moving.iter().enumerate() {
             if i >= prims.len() || !*m {
                 continue;
             }
-            v.extend(layout.block(i));
+            let block = layout.block(i);
+            let sizes = size_slots(&prims[i]);
+            for (offset, vi) in block.enumerate() {
+                if sizes.contains(&offset) && !size_driven[i] {
+                    continue;
+                }
+                v.push(vi);
+            }
         }
         v
     };
@@ -1278,6 +1324,75 @@ mod tests {
             let slid = (got - want).length();
             assert!(slid < 1e-6, "deg={deg}: slid {slid} along the circle");
         }
+    }
+
+    /// 相切**不许改半径**：关系约束只能挪位置/转向，尺寸参数只由尺寸约束驱动。
+    /// 修复前这条会解成 r=24 / 圆心 (4,0) / 线 x=28（数学上相切，用户看到圆被改坏）。
+    #[test]
+    fn tangent_never_resizes_the_circle() {
+        for line_at in [30.0, 24.0, 21.0, 5.0, -30.0] {
+            let c = Circle::new(Vec2::new(0.0, 0.0), 20.0);
+            let l = LineSeg::new(Vec2::new(line_at, -50.0), Vec2::new(line_at, 50.0));
+            let con = Constraint {
+                kind: ConstraintKind::Tangent,
+                a: Target::whole(1),
+                b: Some(Target::whole(0)),
+                value: 0.0,
+            };
+            let out = solve(&[Prim::Circle(c), Prim::Line(l)], &[true, true], &[con]);
+            assert!(out.converged, "line at x={line_at}: resid={}", out.max_residual);
+            let (got_c, got_l) = match (&out.prims[0], &out.prims[1]) {
+                (Prim::Circle(cc), Prim::Line(ll)) => (*cc, *ll),
+                _ => panic!("circle + line"),
+            };
+            println!(
+                "line_at={line_at:>6} -> r={:.6} center.x={:.6} line.x={:.6} tangent={:.3e}",
+                got_c.radius,
+                got_c.center.x,
+                got_l.a.x,
+                got_l.dir().cross(got_c.center - got_l.a) - got_c.radius
+            );
+            // 半径绝不参与：位置怎么平摊是 min-norm 的事，尺寸不是。
+            assert!(
+                (got_c.radius - 20.0).abs() < 1e-9,
+                "line at x={line_at}: radius drifted to {}",
+                got_c.radius
+            );
+            // 相切 = 圆心到直线的垂距等于半径（哪一侧由初始位形冻结，见 plan_branch）。
+            let off = got_l.dir().cross(got_c.center - got_l.a);
+            assert!(
+                (off.abs() - 20.0).abs() < 1e-6,
+                "line at x={line_at}: |off|={} (resid {})",
+                off.abs(),
+                out.max_residual
+            );
+        }
+    }
+
+    /// 但**尺寸约束**照样能改半径：等半径是个关于尺寸的约束，必须放它动。
+    #[test]
+    fn equal_radius_still_drives_the_radius() {
+        let a = Constraint {
+            kind: ConstraintKind::EqualRadius,
+            a: Target::whole(0),
+            b: Some(Target::whole(1)),
+            value: 0.0,
+        };
+        let out = solve(
+            &[
+                Prim::Circle(Circle::new(Vec2::new(0.0, 0.0), 10.0)),
+                Prim::Circle(Circle::new(Vec2::new(100.0, 0.0), 30.0)),
+            ],
+            &[true, true],
+            &[a],
+        );
+        assert!(out.converged, "max residual = {}", out.max_residual);
+        let (ra, rb) = match (&out.prims[0], &out.prims[1]) {
+            (Prim::Circle(x), Prim::Circle(y)) => (x.radius, y.radius),
+            _ => panic!("circles"),
+        };
+        // 各让一半：20 和 20（而不是原地不动）
+        assert!((ra - 20.0).abs() < 1e-6 && (rb - 20.0).abs() < 1e-6, "ra={ra} rb={rb}");
     }
 
     /// 过约束退化：一个圆同时被半径 35 和直径 20（即 r=10）钉住，必须收敛到

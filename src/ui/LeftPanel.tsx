@@ -13,6 +13,7 @@ import { useEditor, selectedEntities } from '../state/editorStore';
 import DatumPanel from './DatumPanel';
 import type { CadDocument, Entity, Layer, LineStyle, Vec2 } from '../core/types';
 import { describeEntity } from '../core/entities';
+import { CONSTRAINT_GLYPH } from '../core/constraints';
 import {
   describeCommonProps,
   describeEntityProps,
@@ -40,6 +41,7 @@ export default function LeftPanel(): React.ReactElement {
   const removeLayerAction = useEditor((s) => s.removeLayerAction);
   const addLayerAction = useEditor((s) => s.addLayerAction);
   const updateEntityById = useEditor((s) => s.updateEntityById);
+  const setDimensionAction = useEditor((s) => s.setDimensionAction);
   const transformSelection = useEditor((s) => s.transformSelection);
   const select = useEditor((s) => s.select);
 
@@ -96,6 +98,18 @@ export default function LeftPanel(): React.ReactElement {
           entities={selectionList}
           doc={doc}
           onApply={(id, fn, label) => updateEntityById(id, fn, label)}
+          onDimension={(id, field, raw) => {
+            const dim = field.dimension!;
+            // 显示值 → 约束目标值（周长/面积/弧长反解成半径），几何用那一行
+            // 自己的 applyTo 落，两者分开传是刻意的：一个进约束，一个进几何。
+            setDimensionAction(
+              id,
+              dim.kind,
+              dim.toValue(raw),
+              (e) => field.applyTo!(e, raw),
+              `改尺寸: ${field.label} = ${raw}`,
+            );
+          }}
           onApplyAll={(fn, label) => transformSelection(fn, label)}
           onFocus={(id) => select([id])}
         />
@@ -244,6 +258,11 @@ interface PropertyTableProps {
   entities: Entity[];
   doc: CadDocument;
   onApply: (id: string, fn: (e: Entity) => Entity, label: string) => void;
+  /**
+   * 尺寸行（`field.dimension` 有值）的提交口：走约束，不走普通几何编辑。
+   * `raw` 是输入框里的数（显示单位）。
+   */
+  onDimension?: (id: string, field: PropField, raw: number) => void;
   onApplyAll: (fn: (e: Entity) => Entity, label: string) => void;
   onFocus: (id: string) => void;
 }
@@ -272,6 +291,7 @@ function SingleProps({
   entity,
   doc,
   onApply,
+  onDimension,
 }: PropertyTableProps & { entity: Entity }): React.ReactElement {
   const sections = describeEntityProps(entity, doc);
   return (
@@ -293,6 +313,9 @@ function SingleProps({
                 key={`${entity.id}:${f.key}`}
                 field={f}
                 onApply={(fn, label) => onApply(entity.id, fn, label)}
+                onDimension={
+                  onDimension ? (field, raw) => onDimension(entity.id, field, raw) : undefined
+                }
               />
             ))}
           </div>
@@ -301,7 +324,11 @@ function SingleProps({
 
       <p className="panel-hint">
         带 · 的参数是派生量（由其它参数算出），改它等于反向解出真正的那一项；
-        悬停可看到具体规则。所有修改都进撤销栈。
+        悬停可看到具体规则。带 <span className="constraint-glyph">↔</span>
+        <span className="constraint-glyph">R</span> 这类记号的参数是<b>尺寸</b>：
+        改它会写成一条持久约束（右下「几何约束」列表里可见、可删），
+        之后它会一直守住这个值，与它相关的图元跟着动。
+        所有修改都进撤销栈。
       </p>
     </div>
   );
@@ -377,10 +404,22 @@ function MultiProps({
 interface PropRowProps {
   field: PropField;
   onApply: (fn: (e: Entity) => Entity, label: string) => void;
+  /** 尺寸行的提交口；缺省时尺寸行也退回普通几何编辑（多选视图即如此）。 */
+  onDimension?: (field: PropField, raw: number) => void;
 }
 
-function PropRow({ field, onApply }: PropRowProps): React.ReactElement {
-  const title = field.hint;
+function PropRow({ field, onApply, onDimension }: PropRowProps): React.ReactElement {
+  // 尺寸行的 tooltip 要说清「这条值会留下一条约束」，否则用户改完半径发现
+  // 右栏凭空多了一条约束会以为是 bug。
+  const title = field.dimension
+    ? `${field.hint ?? ''}\n\n尺寸：改这一项会写入「${
+        field.dimension.kind === 'radius'
+          ? '半径'
+          : field.dimension.kind === 'diameter'
+            ? '直径'
+            : '距离'
+      }」约束，可在右下「几何约束」里删除。`.trim()
+    : field.hint;
   const wrap = (fn: (base: Entity) => Entity): void => onApply(fn, `修改${field.label}`);
 
   return (
@@ -388,8 +427,13 @@ function PropRow({ field, onApply }: PropRowProps): React.ReactElement {
       <label className={`prop-label ${field.derived ? 'derived' : ''}`} title={title}>
         {field.label}
         {field.derived && <span className="derived-mark">·</span>}
+        {field.dimension && (
+          <span className="constraint-glyph" aria-hidden>
+            {CONSTRAINT_GLYPH[field.dimension.kind]}
+          </span>
+        )}
       </label>
-      {renderControl(field, title, wrap)}
+      {renderControl(field, title, wrap, onDimension)}
     </>
   );
 }
@@ -398,6 +442,7 @@ function renderControl(
   field: PropField,
   title: string | undefined,
   wrap: (fn: (base: Entity) => Entity) => void,
+  onDimension?: (field: PropField, raw: number) => void,
 ): React.ReactElement {
   switch (field.kind) {
     case 'info':
@@ -447,7 +492,14 @@ function renderControl(
             max={field.max}
             unit={field.unit}
             placeholder={field.mixed ? '多值' : undefined}
-            onCommit={(n) => wrap((base) => field.applyTo!(base, n))}
+            onCommit={(n) => {
+              // 尺寸 → 写成约束（改值即驱动）；其余照旧直接改几何。
+              if (field.dimension && onDimension) {
+                onDimension(field, n);
+                return;
+              }
+              wrap((base) => field.applyTo!(base, n));
+            }}
           />
           {field.inheritFrom && <InheritButton field={field} wrap={wrap} />}
         </span>

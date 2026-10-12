@@ -22,7 +22,7 @@
 
 import type { CadDocument, Constraint, Entity, EntityId, Vec2 } from '../core/types';
 import { constraintPointAt, entityBoundsTS } from '../core/entities';
-import { CONSTRAINT_GLYPH, describeConstraint } from '../core/constraints';
+import { CONSTRAINT_GLYPH, describeConstraint, isSelfDimension } from '../core/constraints';
 import type { DimContext, DimLabel } from './dims';
 import type { OverlaySegment } from './overlay';
 import { UI_COLORS } from './style';
@@ -155,6 +155,9 @@ export function constraintGuides(
   for (const c of doc.constraints) {
     if (c.kind !== 'distance' && c.kind !== 'distanceX' && c.kind !== 'distanceY') continue;
     if (!c.b) continue;
+    // 直线自己的「长度」尺寸（两端点同属一条线）：解空间就是这条线本身，
+    // 绕起点画个半径 = 长度的圆只会误导。
+    if (isSelfDimension(c)) continue;
     const aSel = selected.has(c.a.entity);
     const bSel = selected.has(c.b.entity);
     if (!aSel && !bSel) continue;

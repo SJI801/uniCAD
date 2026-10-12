@@ -9,7 +9,12 @@ export default defineConfig({
     },
   },
   test: {
-    include: ['_probe_frontend.test.ts', '_probe_store.test.ts'],
+    include: [
+      '_probe_frontend.test.ts',
+      '_probe_store.test.ts',
+      '_probe_dimension.test.ts',
+      '_probe_tangent.test.ts',
+    ],
     pool: 'threads',
     environment: 'node',
   },

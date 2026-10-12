@@ -56,7 +56,9 @@ import { splitCommand, splitEntities, splitTargets } from '../core/split';
 import {
   CONSTRAINT_LABEL,
   buildConstraints,
+  buildEntityDimension,
   constraintsForEntity,
+  isSelfDimension,
   solveConstraints,
   DIMENSIONAL_CONSTRAINTS,
   ZERO_VALUE_DIMENSIONS,
@@ -157,6 +159,11 @@ export interface EditorState {
   /** 起点/终点标色小圆点（绿=起，红=终）。 */
   endpointsVisible: boolean;
   /**
+   * 「完全定义」模式：开启后，挂着约束的图元拒绝拖动——草图进入只读态，
+   * 形状只能通过改尺寸驱动。默认关闭，不改变既有交互。
+   */
+  fullyConstrained: boolean;
+  /**
    * Whether the top ribbon is folded down to a single compact row.
    *
    * In the store rather than in `Ribbon`'s local state for two reasons: the
@@ -179,6 +186,20 @@ export interface EditorState {
   duplicateSelection(offset: Vec2): void;
   transformSelection(fn: (e: Entity) => Entity, label: string): void;
   updateEntityById(id: EntityId, fn: (e: Entity) => Entity, label: string): void;
+  /**
+   * 改值即驱动：面板上敲的一个**尺寸**（半径 / 直径 / 长度）写成持久约束。
+   *
+   * `fn` 把敲进去的数落成几何（就是那一行自己的 `applyTo`），`value` 是它对应
+   * 的**约束目标值**——派生的周长 / 面积 / 弧长要换算成半径，所以两者分开传。
+   * 几何、约束、以及被约束带着一起动的伙伴，全部合成**一条**命令，撤销一次全回来。
+   */
+  setDimensionAction(
+    entityId: EntityId,
+    kind: ConstraintKind,
+    value: number,
+    fn: (e: Entity) => Entity,
+    label: string,
+  ): void;
 
   /** Apply a relationship to the current selection. Validates and logs why not. */
   addConstraintAction(kind: ConstraintKind): void;
@@ -232,6 +253,8 @@ export interface EditorState {
   toggleConstraints(): void;
   setEndpointsVisible(visible: boolean): void;
   toggleEndpoints(): void;
+  setFullyConstrained(visible: boolean): void;
+  toggleFullyConstrained(): void;
   setRibbonCollapsed(collapsed: boolean): void;
   toggleRibbon(): void;
 
@@ -303,6 +326,7 @@ const MAX_LOG = 200;
 const RIBBON_COLLAPSED_KEY = 'unicad.ui.ribbonCollapsed';
 const CONSTRAINTS_VISIBLE_KEY = 'unicad.ui.constraintsVisible';
 const ENDPOINTS_VISIBLE_KEY = 'unicad.ui.endpointsVisible';
+const FULLY_CONSTRAINED_KEY = 'unicad.ui.fullyConstrained';
 
 /**
  * Viewport width below which a first-time visitor gets the folded ribbon.
@@ -381,6 +405,7 @@ export const useEditor = create<EditorState>((set, get) => ({
   dimsVisible: true,
   constraintsVisible: readUiFlag(CONSTRAINTS_VISIBLE_KEY, true),
   endpointsVisible: readUiFlag(ENDPOINTS_VISIBLE_KEY, true),
+  fullyConstrained: readUiFlag(FULLY_CONSTRAINED_KEY, false),
   ribbonCollapsed: readUiFlag(
     RIBBON_COLLAPSED_KEY,
     window.innerWidth < RIBBON_AUTO_COLLAPSE_BELOW,
@@ -555,6 +580,74 @@ export const useEditor = create<EditorState>((set, get) => ({
     const patches = withConstraintRepair(doc, [after], [...moving], label, false);
     if (patches.length === 0) return;
     get().run(command(label, ...patches));
+  },
+
+  /**
+   * 改值即驱动 —— ROADMAP 0.2。
+   *
+   * 「改圆半径，与它相切的线保持相切」这句话拆开就是这里的三步：
+   *
+   * 1. 先把敲进去的数落成**几何**（`fn`）。尺寸是意图，几何得先跟上，
+   *    否则约束一进去就是违约状态。
+   * 2. 同一个数写成**约束**（没有就加、有就改），于是这个值从此有了身份：
+   *    它会一直守住，改别的尺寸、拖别的图元都不会把它带走。
+   * 3. 只放开**伙伴**解算。被编辑对象自己不许动 —— 与 `updateEntityById` 同一条
+   *    理由：放开它，求解器会拿「把半径改回 20」去凑相切，用户刚敲的 30 当场
+   *    被撤销。伙伴（那条切线）动，圆不动，才是「半径是驱动量」。
+   *
+   * 三步合成一条 Command：一次撤销同时撤回几何、伙伴和约束本身。
+   */
+  setDimensionAction(entityId, kind, value, fn, label) {
+    const { doc } = get();
+    const before = doc.entities.find((e) => e.id === entityId);
+    if (!before) return;
+
+    // 半径 / 直径 / 长度都没有 0 的意义（0 长度的线、0 半径的圆不是图形）。
+    if (!Number.isFinite(value) || !(value > 0)) {
+      get().pushLog('尺寸必须大于 0');
+      return;
+    }
+
+    const made = buildEntityDimension(before, kind, value);
+    if (!made) {
+      // 这一类没有对应的尺寸约束（如直线的角度、椭圆半轴）：退回普通几何编辑，
+      // 至少不要让输入框看起来不生效。
+      get().updateEntityById(entityId, fn, label);
+      return;
+    }
+
+    const edited = fn(before);
+
+    // 同一条尺寸（同 kind、同目标点）已存在就改它的值，不再堆第二条。
+    const existing = doc.constraints.find((c) => sameConstraint(c, made));
+    if (existing && Math.abs((existing.value ?? 0) - value) < 1e-9) return;
+
+    const shadow: CadDocument = {
+      ...doc,
+      constraints: existing
+        ? doc.constraints.map((c) => (c === existing ? made : c))
+        : [...doc.constraints, made],
+    };
+
+    const moving = new Set<EntityId>();
+    for (const c of constraintsForEntity(doc, entityId)) {
+      moving.add(c.a.entity);
+      if (c.b) moving.add(c.b.entity);
+    }
+    moving.delete(entityId);
+
+    const patches: Patch[] = [updateEntity(before, edited)];
+    patches.push(existing ? updateConstraint(existing, made) : addConstraint(made));
+    for (const solved of solveAfterEdit(shadow, [edited], [...moving])) {
+      const was = doc.entities.find((e) => e.id === solved.id);
+      if (was && !geometryEquals(was, solved)) patches.push(updateEntity(was, solved));
+    }
+
+    get().run(command(label, ...patches));
+    get().pushLog(
+      `${existing ? '已改写' : '已写入'}「${CONSTRAINT_LABEL[kind]}」尺寸约束 = ${fmt(value)}` +
+        `（右栏约束列表里可删除）`,
+    );
   },
 
   addConstraintAction(kind) {
@@ -982,6 +1075,17 @@ export const useEditor = create<EditorState>((set, get) => ({
     get().pushLog(visible ? '端点标色: 显示' : '端点标色: 隐藏');
   },
 
+  setFullyConstrained(visible) {
+    writeUiFlag(FULLY_CONSTRAINED_KEY, visible);
+    set({ fullyConstrained: visible });
+  },
+
+  toggleFullyConstrained() {
+    const visible = !get().fullyConstrained;
+    get().setFullyConstrained(visible);
+    get().pushLog(visible ? '完全定义: 开（草图已锁定，改尺寸驱动）' : '完全定义: 关');
+  },
+
   setRibbonCollapsed(collapsed) {
     writeUiFlag(RIBBON_COLLAPSED_KEY, collapsed);
     set({ ribbonCollapsed: collapsed });
@@ -1285,6 +1389,9 @@ function withConstraintRepair(
       if (c.a.entity !== e.id) continue;
       if (c.kind !== 'distance' && c.kind !== 'distanceX' && c.kind !== 'distanceY') continue;
       if (!c.b) continue;
+      // 直线自己的「长度」尺寸（两端点都在它身上）不是圆心语义：钉住起点会
+      // 让拖动变成拉伸。长度约束对平移完全无感，本来就该整条线跟着走。
+      if (isSelfDimension(c)) continue;
       const owner = doc.entities.find((x) => x.id === c.a.entity);
       if (!owner) continue;
       const at = constraintPointAt(owner, c.a.point, c.a.index ?? 0);

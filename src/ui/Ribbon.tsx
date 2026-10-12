@@ -82,6 +82,8 @@ export default function Ribbon(props: RibbonProps): React.ReactElement {
   const toggleConstraints = useEditor((s) => s.toggleConstraints);
   const toggleEndpoints = useEditor((s) => s.toggleEndpoints);
   const endpointsVisible = useEditor((s) => s.endpointsVisible);
+  const toggleFullyConstrained = useEditor((s) => s.toggleFullyConstrained);
+  const fullyConstrained = useEditor((s) => s.fullyConstrained);
 
   const activeOsnapMask = packOsnapMask(doc.settings.osnapModes);
 
@@ -320,6 +322,19 @@ export default function Ribbon(props: RibbonProps): React.ReactElement {
               {constraintsVisible ? '☑' : '☐'}
             </span>
             <span className="ribbon-menu-label">显示约束标记</span>
+          </button>
+          <button
+            className="ribbon-menu-item"
+            role="menuitemcheckbox"
+            aria-checked={fullyConstrained}
+            onClick={() => {
+              toggleFullyConstrained();
+            }}
+          >
+            <span className="ribbon-menu-glyph" aria-hidden>
+              {fullyConstrained ? '☑' : '☐'}
+            </span>
+            <span className="ribbon-menu-label">完全定义（锁定拖动）</span>
           </button>
         </>
       ) : null}

@@ -43,9 +43,24 @@
  * Angles are radians everywhere else in the codebase and **degrees** here. The
  * conversion is confined to this file, so no caller has to remember which is
  * which — the panel input and the store never meet.
+ *
+ * Dimensions vs raw parameters
+ * ----------------------------
+ * A few rows are not just a parameter — they are a **dimension**, and editing
+ * one has to leave something behind that keeps holding. Those rows carry a
+ * `dimension`: the panel routes the commit through `setDimensionAction`, which
+ * writes the value onto a persistent constraint and only then lets the solver
+ * move the partners (see `buildEntityDimension`). Everything else stays a plain
+ * geometry poke with the usual constraint repair.
+ *
+ * Only the quantities a *single* entity can own are dimensions: its radius /
+ * diameter (and the derived circumference and area, which reverse-solve to the
+ * radius) and a line's length. A line's **angle** is deliberately not one — the
+ * `angle` constraint is defined between two lines, and inventing a one-line
+ * version is a new constraint kind, not a panel wiring detail.
  */
 
-import type { CadDocument, Entity, LayerId, LineStyle, Vec2 } from './types';
+import type { CadDocument, ConstraintKind, Entity, LayerId, LineStyle, Vec2 } from './types';
 import { normalizeSweep } from './entities';
 
 const DEG = 180 / Math.PI;
@@ -86,6 +101,20 @@ export const LINE_STYLE_OPTIONS: ReadonlyArray<{ value: LineStyle; label: string
 
 export type PropKind = 'number' | 'vec2' | 'bool' | 'text' | 'color' | 'enum' | 'info';
 
+/**
+ * A row that is a **dimension** rather than a bare parameter.
+ *
+ * `kind` is the constraint the value is written onto; `toValue` converts the
+ * number in the input box into that constraint's target. They differ only for
+ * the derived rows — 周长 and 面积 reverse-solve to a *radius* dimension, 弧长 to
+ * a radius too — and keeping the conversion here is what lets the panel commit
+ * 「what the user typed」 while the document stores 「the dimension it means」.
+ */
+export interface PropDimension {
+  kind: ConstraintKind;
+  toValue(from: number): number;
+}
+
 export interface PropField {
   /** Stable key. Published as `data-param` so scripts can address a control. */
   key: string;
@@ -118,6 +147,11 @@ export interface PropField {
   options?: ReadonlyArray<{ value: string; label: string }>;
   /** Apply a scalar: number rows, and one axis of a `vec2` row. */
   applyTo?(base: Entity, v: number, axis?: 0 | 1): Entity;
+  /**
+   * Set on the rows that are a **dimension**: committing them writes a
+   * persistent constraint instead of just poking the geometry.
+   */
+  dimension?: PropDimension;
   /** Apply a non-numeric value: bool / text / color / enum rows. */
   applyValueTo?(base: Entity, v: string | boolean): Entity;
   /** Clear the override so the value comes from the layer again. */
@@ -283,6 +317,9 @@ function lineFields(e: Extract<Entity, { type: 'line' }>): PropField[] {
       derived: true,
       min: 0,
       step: 1,
+      // 长度是**尺寸**：写成「两端点距离」约束（直线自己就是那两点），
+      // 之后它会一直守住这个值——拖动整条线是平移，长度不变。
+      dimension: { kind: 'distance', toValue: (v) => v },
       hint: '固定起点，沿当前方向移动终点。方向未定义（长度为零）时按 +X 处理。',
       applyTo: (base, v) => {
         const line = base as Extract<Entity, { type: 'line' }>;
@@ -340,6 +377,7 @@ function circleFields(e: Extract<Entity, { type: 'circle' }>): PropField[] {
       value: round(r),
       min: 0,
       step: 1,
+      dimension: { kind: 'radius', toValue: (v) => v },
       hint: '圆的半径，是圆唯一的尺寸自由度。',
       applyTo: (base, v) => ({ ...base, radius: Math.max(0, v) } as Entity),
     },
@@ -351,6 +389,7 @@ function circleFields(e: Extract<Entity, { type: 'circle' }>): PropField[] {
       derived: true,
       min: 0,
       step: 1,
+      dimension: { kind: 'diameter', toValue: (v) => v },
       hint: '派生：半径 = 直径 ÷ 2。',
       applyTo: (base, v) => ({ ...base, radius: Math.max(0, v) / 2 } as Entity),
     },
@@ -362,6 +401,7 @@ function circleFields(e: Extract<Entity, { type: 'circle' }>): PropField[] {
       derived: true,
       min: 0,
       step: 1,
+      dimension: { kind: 'radius', toValue: (v) => v / TAU },
       hint: '派生：半径 = 周长 ÷ 2π。',
       applyTo: (base, v) => ({ ...base, radius: Math.max(0, v) / TAU } as Entity),
     },
@@ -373,6 +413,7 @@ function circleFields(e: Extract<Entity, { type: 'circle' }>): PropField[] {
       derived: true,
       min: 0,
       step: 1,
+      dimension: { kind: 'radius', toValue: (v) => Math.sqrt(Math.max(0, v) / Math.PI) },
       hint: '派生：半径 = √(面积 ÷ π)。',
       applyTo: (base, v) => ({ ...base, radius: Math.sqrt(Math.max(0, v) / Math.PI) } as Entity),
     },
@@ -400,6 +441,7 @@ function arcFields(e: Extract<Entity, { type: 'arc' }>): PropField[] {
       value: round(e.radius),
       min: 0,
       step: 1,
+      dimension: { kind: 'radius', toValue: (v) => v },
       hint: '圆弧半径。',
       applyTo: (base, v) => ({ ...base, radius: Math.max(0, v) } as Entity),
     },
@@ -451,6 +493,8 @@ function arcFields(e: Extract<Entity, { type: 'arc' }>): PropField[] {
       derived: true,
       min: 0,
       step: 1,
+      // 反解出来的是半径，所以写的是「半径」尺寸（与周长 / 面积同一手法）。
+      dimension: { kind: 'radius', toValue: (v) => (sweep > 1e-9 ? v / sweep : v) },
       hint: '派生：固定圆心角，半径 = 弧长 ÷ 扫掠角。',
       applyTo: (base, v) => {
         const a = base as Extract<Entity, { type: 'arc' }>;

@@ -536,6 +536,60 @@ export function buildConstraints(kind: ConstraintKind, entities: readonly Entity
 }
 
 // ---------------------------------------------------------------------------
+// One entity's own dimension — 改值即驱动
+// ---------------------------------------------------------------------------
+
+/**
+ * The constraint that expresses **one entity's own dimension**.
+ *
+ * This is what makes 「改值即驱动」 work: a radius typed into the panel (or into
+ * a dimension label) is not applied to the geometry and then forgotten — it is
+ * written onto a constraint, so the value survives the next edit and keeps
+ * driving the geometry from then on.
+ *
+ * Two shapes, both already expressible by the kernel:
+ *
+ * * **`radius` / `diameter`** pin the curve itself (unary: `b` absent), exactly
+ *   like the 半径 / 直径 buttons in the Ribbon.
+ * * **`distance` between a line's own two endpoints** is its **length**. The
+ *   kernel only ever wanted two *named points* for a distance — nothing requires
+ *   them to live on different entities, so a self-referencing distance is a
+ *   length dimension with no new residual kind and no wire-format change. (Two
+ *   whole curves still have no distance, which is why that stays the front end's
+ *   job; see `buildConstraints`.)
+ *
+ * Returns `null` for a combination that has no dimension — e.g. a line's angle
+ * (the `angle` kind needs *two* lines) or an ellipse's semi-axes (no such kind
+ * yet). The caller keeps the plain geometry edit in that case.
+ */
+export function buildEntityDimension(
+  e: Entity,
+  kind: ConstraintKind,
+  value: number,
+): Constraint | null {
+  if (kind === 'radius' || kind === 'diameter') {
+    if (e.type !== 'circle' && e.type !== 'arc') return null;
+    return { id: nextConstraintId(), kind, a: { entity: e.id, point: 'none' }, value };
+  }
+  if (kind === 'distance') {
+    if (e.type !== 'line') return null;
+    return {
+      id: nextConstraintId(),
+      kind,
+      a: { entity: e.id, point: 'start' },
+      b: { entity: e.id, point: 'end' },
+      value,
+    };
+  }
+  return null;
+}
+
+/** Whether a constraint is a single entity's own dimension (`a` and `b` on it). */
+export function isSelfDimension(c: Constraint): boolean {
+  return c.b !== undefined && c.b.entity === c.a.entity;
+}
+
+// ---------------------------------------------------------------------------
 // The solver bridge
 // ---------------------------------------------------------------------------
 
