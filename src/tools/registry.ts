@@ -25,6 +25,7 @@ export const TOOL_SPECS: ToolSpec[] = [
   { id: 'extrude', name: '拉伸', alias: 'X', glyph: '⬒', hint: '把封闭草图拉成 3D 实体：选轮廓 → 输入高度' },
   { id: 'revolve', name: '旋转', alias: 'REV', glyph: '◑', hint: '把封闭草图绕一根直线车削：选轮廓 → 选轴 → 输入角度（度）' },
   { id: 'hole', name: '打孔', alias: 'H', glyph: '⊚', hint: '在 3D 视图里点一个实体表面打孔（参数在特征树上改）' },
+  { id: 'loft', name: '放样', alias: 'LOFT', glyph: '◭', hint: '两张不同基准面上的封闭截面 → 蒙成实体（变径管）' },
   { id: 'measure', name: '测量', alias: 'DI', glyph: '⇔', hint: '测量两点距离与角度' },
 ];
 

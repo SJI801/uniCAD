@@ -518,16 +518,37 @@ export interface PatternFeature extends FeatureBase {
 }
 
 /**
- * The feature kinds. Extrude and revolve read a sketch, boolean reads two
- * features, a hole generates its own cutter from a face, and a pattern reads
- * another feature's *parameters* and repeats them.
+ * A loft — a solid skinned across a sequence of closed sections (work package
+ * 3.4), each of which lives in its own sketch on its own plane.
+ *
+ * This is the first feature that reads **more than one sketch**, and it is the
+ * reason the document is a tree rather than a pile of entities: the sections are
+ * referenced by id, each one keeps its own plane, and the solid between them is
+ * re-derived on every evaluation. Nothing is copied, so editing either section
+ * re-skins the whole solid.
+ */
+export interface LoftFeature extends FeatureBase {
+  kind: 'loft';
+  /**
+   * The closed sections, in the order they are skinned — at least two. Each
+   * entity's *sketch* supplies the plane it sits on.
+   */
+  sections: EntityId[];
+  layer: LayerId;
+}
+
+/**
+ * The feature kinds. Extrude and revolve read one sketch, a loft reads two or
+ * more, boolean reads two features, a hole generates its own cutter from a face,
+ * and a pattern reads another feature's *parameters* and repeats them.
  */
 export type Feature =
   | ExtrudeFeature
   | RevolveFeature
   | BooleanFeature
   | HoleFeature
-  | PatternFeature;
+  | PatternFeature
+  | LoftFeature;
 
 /**
  * A lathe: a profile revolved around an axis by `angle` radians.

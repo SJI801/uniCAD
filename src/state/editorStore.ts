@@ -424,9 +424,9 @@ const FULLY_CONSTRAINED_KEY = 'unicad.ui.fullyConstrained';
  *
  * 加控件就要跟着调这个数 —— 它必须 ≥ 展开态的实际内容宽，否则会出现
  * 「默认展开、但根本放不下」。加了「约束」分组(2140)、「修剪」工具(2210)、
- * 「交点分解」按钮(2280) 与「旋转」工具(2340)、「打孔」工具(2400) 后五次上调。
+ * 「交点分解」按钮(2280) 与「旋转」工具(2340)、「打孔」工具(2400)、「放样」工具(2460) 后六次上调。
  */
-const RIBBON_AUTO_COLLAPSE_BELOW = 2400;
+const RIBBON_AUTO_COLLAPSE_BELOW = 2460;
 
 /**
  * What a fresh pattern starts as: three instances 10 mm apart. Enough that the

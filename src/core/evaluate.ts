@@ -25,15 +25,17 @@
 import type {
   BooleanFeature,
   CadDocument,
+  Entity,
   ExtrudeFeature,
   Feature,
   FeatureId,
   HoleFeature,
+  LoftFeature,
   PatternFeature,
   RevolveFeature,
 } from './types';
 import { findEntity, findFeature, findSketch, sketchOfEntity } from './doc';
-import { booleanMesh, extrudeMesh, holeMesh, isKernelReady, revolveMesh } from './kernel';
+import { booleanMesh, extrudeMesh, holeMesh, isKernelReady, loftMesh, revolveMesh } from './kernel';
 import { findPlane, planeFrame } from './types';
 
 export type FeatureStatus = 'ok' | 'consumed' | 'suppressed' | 'error';
@@ -134,6 +136,8 @@ function evalFeature(
       return evalHole(f, meshes);
     case 'pattern':
       return evalPattern(doc, f, meshes);
+    case 'loft':
+      return evalLoft(doc, f);
   }
 }
 
@@ -298,6 +302,41 @@ function evalPattern(
     source.boreDepth,
   );
   if (!verts) return fail('阵列后没有剩余实体');
+  return { feature: f, status: 'ok', verts };
+}
+
+function evalLoft(doc: CadDocument, f: LoftFeature): FeatureEval {
+  const fail = (why: string): FeatureEval => ({
+    feature: f,
+    status: 'error',
+    error: `${f.name}: ${why}`,
+    verts: EMPTY_VERTS,
+  });
+
+  if (f.sections.length < 2) return fail('放样至少需要两个截面');
+
+  const parts: Array<{ profile: Entity; frame: Float64Array }> = [];
+  for (const id of f.sections) {
+    const profile = findEntity(doc, id);
+    if (!profile) return fail('有一个截面已被删除');
+    // Each section's plane comes from the *sketch that holds it* — which is why
+    // a loft can span sketches: nothing about the plane is stored on the
+    // feature, so moving a section to another plane (or editing its sketch)
+    // re-skins the solid.
+    const sketch = sketchOfEntity(doc, id);
+    const plane = sketch ? findPlane(doc, sketch.plane) : undefined;
+    if (!plane) return fail('有一个截面所在的基准面已被删除');
+    parts.push({ profile, frame: planeFrame(plane) });
+  }
+  // Two sections on one plane have no "above" to sweep to; the kernel would
+  // answer with an empty mesh, and "empty" is not the reason the user needs.
+  const planes = new Set(f.sections.map((id) => sketchOfEntity(doc, id)?.plane));
+  if (planes.size < 2) return fail('两个截面在同一平面上（放样需要不同平面的截面）');
+
+  if (!isKernelReady()) return { feature: f, status: 'ok', verts: EMPTY_VERTS };
+
+  const verts = loftMesh(parts);
+  if (!verts) return fail('截面无法围成实体（轮廓不封闭，或截面与放样方向平行）');
   return { feature: f, status: 'ok', verts };
 }
 

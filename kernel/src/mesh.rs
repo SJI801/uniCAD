@@ -590,6 +590,198 @@ pub fn perpendicular_basis(n: [f64; 3]) -> ([f64; 3], [f64; 3]) {
     (u, v)
 }
 
+/// Loft: skin a sequence of closed sections into one solid (work package 3.4).
+///
+/// Each section is a 2D loop in **its own** plane — the sections come from
+/// different sketches, which is the whole point of a loft: a shape that changes
+/// from one cross-section to another, like a tapered pipe. Each loop is placed
+/// in world space by its frame.
+///
+/// The sections are resampled to a **common point count by arc length**,
+/// starting at each loop's own first vertex, and then connected index to index.
+/// That is the simple, predictable correspondence: two circles drawn from angle
+/// 0 line up, two rectangles drawn from the same corner line up. A smarter
+/// matching (closest point, minimal twist) is a separate piece of work — how a
+/// loft twists is a modelling decision, not something to guess at.
+///
+/// Returns an empty mesh when the sections cannot bound a solid: fewer than two
+/// of them, or stacked so that a section's plane is parallel to the loft
+/// direction (a loft cannot go sideways inside its own sections' planes).
+pub fn loft(sections: &[(Vec<Vec2>, Frame)]) -> Mesh {
+    let first_frame = sections.first().map(|(_, f)| *f).unwrap_or_else(Frame::xy);
+    if sections.len() < 2 {
+        return Mesh::new(first_frame);
+    }
+
+    // The loft direction: from the first section's centre to the last's. Every
+    // section's placement is compared against it.
+    let centroid = |pts: &[Vec2]| -> Vec2 {
+        let mut x = 0.0;
+        let mut y = 0.0;
+        for p in pts {
+            x += p.x;
+            y += p.y;
+        }
+        let n = pts.len().max(1) as f64;
+        Vec2::new(x / n, y / n)
+    };
+    let (first_pts, first_fr) = &sections[0];
+    let (last_pts, last_fr) = &sections[sections.len() - 1];
+    let a = first_fr.point([centroid(first_pts).x, centroid(first_pts).y, 0.0]);
+    let b = last_fr.point([centroid(last_pts).x, centroid(last_pts).y, 0.0]);
+    let Some(dir) = norm3(sub3(b, a)) else {
+        return Mesh::new(first_frame);
+    };
+
+    // Resample every section to one point count, and orient each loop so that it
+    // runs counter-clockwise seen along `dir` — that single rule is what lets the
+    // walls use extrude's winding (interior on the left of a→b) instead of a
+    // per-quad guess about which way is out.
+    let n = sections
+        .iter()
+        .map(|(pts, _)| pts.len())
+        .max()
+        .unwrap_or(0)
+        .clamp(3, 512);
+    let mut rings: Vec<Vec<[f64; 3]>> = Vec::with_capacity(sections.len());
+    for (pts, frame) in sections {
+        // A section whose plane is parallel to the loft direction cannot bound a
+        // solid with the others: there is no "above" to sweep to.
+        if dot3(frame.n, dir).abs() <= 1e-9 {
+            return Mesh::new(first_frame);
+        }
+        let mut loop_pts = resample_closed(pts, n);
+        // `frame.n` and `dir` may disagree; flipping the loop flips its winding,
+        // which is exactly what the wall rule needs.
+        if dot3(frame.n, dir) < 0.0 {
+            loop_pts.reverse();
+        }
+        rings.push(loop_pts.iter().map(|p| frame.point([p.x, p.y, 0.0])).collect());
+    }
+
+    let mut mesh = Mesh::new(first_frame);
+
+    // ---- walls -----------------------------------------------------------
+    for k in 0..rings.len() - 1 {
+        let (low, high) = (&rings[k], &rings[k + 1]);
+        for i in 0..n {
+            let j = (i + 1) % n;
+            let (aa, bb) = (low[i], low[j]);
+            let (a_up, b_up) = (high[i], high[j]);
+            // Per-triangle normals rather than one per quad: a loft's wall between
+            // two sections is generally *not* planar, and pretending otherwise
+            // would light half of it from the wrong side.
+            for t in [[aa, bb, b_up], [aa, b_up, a_up]] {
+                if let Some(nrm) = norm3(cross3(sub3(t[1], t[0]), sub3(t[2], t[0]))) {
+                    mesh.tri(t[0], t[1], t[2], nrm);
+                }
+            }
+        }
+    }
+
+    // ---- caps ------------------------------------------------------------
+    //
+    // The first section's triangles come out facing +dir (CCW in its plane), so
+    // they are emitted reversed to face −dir — extrude's bottom-cap rule — and
+    // the last section keeps its winding.
+    let mut start = resample_closed(&sections[0].0, n);
+    if dot3(sections[0].1.n, dir) < 0.0 {
+        start.reverse();
+    }
+    let mut end = resample_closed(&sections[sections.len() - 1].0, n);
+    if dot3(sections[sections.len() - 1].1.n, dir) < 0.0 {
+        end.reverse();
+    }
+    let neg = [-dir[0], -dir[1], -dir[2]];
+    let start_frame = sections[0].1;
+    for t in triangulate(&start) {
+        let (a, b, c) = (start[t[0]], start[t[1]], start[t[2]]);
+        mesh.tri(
+            start_frame.point([a.x, a.y, 0.0]),
+            start_frame.point([c.x, c.y, 0.0]),
+            start_frame.point([b.x, b.y, 0.0]),
+            neg,
+        );
+    }
+    let end_frame = sections[sections.len() - 1].1;
+    for t in triangulate(&end) {
+        let (a, b, c) = (end[t[0]], end[t[1]], end[t[2]]);
+        mesh.tri(
+            end_frame.point([a.x, a.y, 0.0]),
+            end_frame.point([b.x, b.y, 0.0]),
+            end_frame.point([c.x, c.y, 0.0]),
+            dir,
+        );
+    }
+    mesh
+}
+
+/// Resample a closed loop to exactly `n` points by **splitting its edges** —
+/// never dropping a vertex. `n` must be at least the loop's vertex count, which
+/// the caller guarantees by taking the maximum over all sections.
+///
+/// Splitting rather than re-spacing: the extra points land on the existing edges
+/// and every original corner survives, so the loop stays *the same polygon* with
+/// more vertices and its area is untouched. Re-spacing the loop evenly would cut
+/// corners instead — a 4×6 rectangle sampled at 7 even steps loses about a unit
+/// of area — and every section would quietly shrink as it was lofted.
+fn resample_closed(pts: &[Vec2], n: usize) -> Vec<Vec2> {
+    let m = pts.len();
+    if m == 0 {
+        return Vec::new();
+    }
+    if n <= m {
+        return pts.to_vec();
+    }
+    let mut lens = Vec::with_capacity(m);
+    let mut total = 0.0;
+    for i in 0..m {
+        let a = pts[i];
+        let b = pts[(i + 1) % m];
+        let l = Vec2::new(b.x - a.x, b.y - a.y).length();
+        lens.push(l);
+        total += l;
+    }
+
+    // Each edge is split into at least one piece; the remainder is shared out in
+    // proportion to length, so a long edge takes more of the new points than a
+    // short one and the spacing stays roughly even.
+    let extra = n - m;
+    let mut pieces = vec![1usize; m];
+    if total > 1e-12 {
+        let mut assigned = 0usize;
+        for i in 0..m {
+            let share = (extra as f64 * lens[i] / total).floor() as usize;
+            pieces[i] += share;
+            assigned += share;
+        }
+        let mut order: Vec<usize> = (0..m).collect();
+        order.sort_by(|&a, &b| lens[b].partial_cmp(&lens[a]).unwrap_or(std::cmp::Ordering::Equal));
+        let mut k = 0usize;
+        while assigned < extra {
+            pieces[order[k % m]] += 1;
+            assigned += 1;
+            k += 1;
+        }
+    } else {
+        // A degenerate loop: everything at one point.
+        pieces[0] += extra;
+    }
+
+    let mut out = Vec::with_capacity(n);
+    for i in 0..m {
+        let a = pts[i];
+        let b = pts[(i + 1) % m];
+        // The edge's own end vertex is the next edge's start, so only the
+        // interior samples are emitted here.
+        for s in 0..pieces[i] {
+            let t = s as f64 / pieces[i] as f64;
+            out.push(Vec2::new(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t));
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -705,6 +897,124 @@ mod tests {
         let arc = Prim::Arc(Arc::new(Vec2::new(0.0, 0.0), 5.0, 0.0, 1.0));
         assert!(closed_loop(&arc, 0.05, 64).is_none());
     }
+
+    /// A ring of `radius` in the plane `z = height` — what one sketch of a
+    /// tapered pipe contributes.
+    fn circle_at(radius: f64, height: f64) -> (Vec<Vec2>, Frame) {
+        let prim = Prim::Circle(Circle::new(Vec2::zero(), radius));
+        let pts = closed_loop(&prim, 0.05, 256).expect("circle is a closed loop");
+        (pts, plane_at(height))
+    }
+
+    fn plane_at(height: f64) -> Frame {
+        Frame {
+            origin: [0.0, 0.0, height],
+            u: [1.0, 0.0, 0.0],
+            v: [0.0, 1.0, 0.0],
+            n: [0.0, 0.0, 1.0],
+        }
+    }
+
+    /// A rectangle centred on the plane's origin.
+    fn rect_at(w: f64, h: f64, height: f64) -> (Vec<Vec2>, Frame) {
+        let pts = vec![
+            Vec2::new(-w / 2.0, -h / 2.0),
+            Vec2::new(w / 2.0, -h / 2.0),
+            Vec2::new(w / 2.0, h / 2.0),
+            Vec2::new(-w / 2.0, h / 2.0),
+        ];
+        (pts, plane_at(height))
+    }
+
+    // -----------------------------------------------------------------------
+    // Loft (work package 3.4)
+    // -----------------------------------------------------------------------
+
+    /// Two rectangles give a **prismatoid**, so the volume is exact:
+    /// `h/6·(A₁ + A₂ + 4·A_mid)` with `A_mid` the average rectangle. A broken
+    /// vertex correspondence or an inside-out wall shows up immediately.
+    #[test]
+    fn lofts_two_rectangles_into_an_exact_prismatoid() {
+        let m = loft(&[rect_at(4.0, 4.0, 0.0), rect_at(8.0, 6.0, 10.0)]);
+        let expect = 10.0 / 6.0 * (16.0 + 48.0 + 4.0 * 30.0);
+        let v = soup_volume(&m.verts);
+        assert!((v - expect).abs() < 1e-9, "loft volume {v}, expected {expect}");
+        assert!(v > 0.0, "the loft is inside-out");
+    }
+
+    /// The acceptance case: a tapered pipe from two circles. Their tessellations
+    /// have different side counts, so both are resampled to the common count —
+    /// which is why this one is checked against the ideal frustum within a
+    /// percent or so rather than exactly.
+    #[test]
+    fn lofts_two_circles_into_a_tapered_pipe() {
+        let m = loft(&[circle_at(3.0, 0.0), circle_at(6.0, 10.0)]);
+        let expect = std::f64::consts::PI * 10.0 * (3.0 * 3.0 + 3.0 * 6.0 + 6.0 * 6.0) / 3.0;
+        let v = soup_volume(&m.verts);
+        assert!(
+            (v - expect).abs() < expect * 0.02,
+            "tapered pipe volume {v}, expected about {expect}"
+        );
+        assert!(v > 0.0, "the pipe is inside-out");
+    }
+
+    /// Three sections: the walls chain end to end and only the two *ends* get
+    /// caps — one extra section is one more frustum, not a new cap.
+    #[test]
+    fn lofts_a_chain_of_three_sections() {
+        let m = loft(&[rect_at(4.0, 4.0, 0.0), rect_at(8.0, 8.0, 5.0), rect_at(4.0, 4.0, 10.0)]);
+        let one = 5.0 / 6.0 * (16.0 + 64.0 + 4.0 * 36.0);
+        let v = soup_volume(&m.verts);
+        assert!((v - 2.0 * one).abs() < 1e-9, "chained loft volume {v}");
+    }
+
+    /// Fewer than two sections, or a section standing parallel to the loft
+    /// direction, is not a solid: empty, not a crash.
+    #[test]
+    fn impossible_lofts_come_back_empty() {
+        assert_eq!(loft(&[]).vertex_count(), 0);
+        assert_eq!(loft(&[rect_at(4.0, 4.0, 0.0)]).vertex_count(), 0);
+        // A section on its side: its plane contains the loft direction, so there
+        // is no "above" for it to sweep to.
+        let sideways = Frame {
+            origin: [0.0, 0.0, 5.0],
+            u: [0.0, 1.0, 0.0],
+            v: [0.0, 0.0, 1.0],
+            n: [1.0, 0.0, 0.0],
+        };
+        let pts = vec![
+            Vec2::new(-2.0, -2.0),
+            Vec2::new(2.0, -2.0),
+            Vec2::new(2.0, 2.0),
+            Vec2::new(-2.0, 2.0),
+        ];
+        assert_eq!(loft(&[rect_at(4.0, 4.0, 0.0), (pts, sideways)]).vertex_count(), 0);
+    }
+
+    /// Resampling keeps a polygon *as* that polygon: the new points land on the
+    /// existing edges, every original corner survives, and the area is
+    /// untouched. That is what makes the volumes above predictable at all.
+    #[test]
+    fn resampling_preserves_a_polygons_area() {
+        let (pts, _) = rect_at(4.0, 6.0, 0.0);
+        for n in [4usize, 7, 16, 100] {
+            let out = resample_closed(&pts, n);
+            assert_eq!(out.len(), n, "point count");
+            assert!(
+                (signed_area(&out).abs() - 24.0).abs() < 1e-9,
+                "area changed at n = {n}: {}",
+                signed_area(&out).abs()
+            );
+            // Every original corner is still on the loop.
+            for corner in &pts {
+                assert!(
+                    out.iter().any(|p| (p.x - corner.x).abs() < 1e-12 && (p.y - corner.y).abs() < 1e-12),
+                    "a corner was dropped at n = {n}"
+                );
+            }
+        }
+    }
+
 
     // -----------------------------------------------------------------------
     // Ray picking (work package 3.2 — clicking a face in the 3D view)

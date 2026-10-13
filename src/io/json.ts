@@ -203,6 +203,11 @@ function encodeNode(n: TreeNode): Record<string, unknown> {
           layer: f.layer,
         },
       };
+    case 'loft':
+      return {
+        kind: 'feature',
+        feature: { kind: 'loft', ...base, sections: [...f.sections], layer: f.layer },
+      };
   }
 }
 
@@ -749,6 +754,16 @@ function decodeFeatureNode(raw: unknown): Feature | null {
       const spacingV = num(o['spacingV'], 0);
       if (source && Number.isFinite(count) && Number.isFinite(spacing) && Number.isFinite(countV) && Number.isFinite(spacingV)) {
         return { kind: 'pattern', id, name: str(o['name']) || id, ...suppressed, source, count, spacing, countV, spacingV, layer };
+      }
+      return null;
+    }
+    if (kind === 'loft') {
+      const raw = o['sections'];
+      const sections = Array.isArray(raw) ? raw.filter((s): s is string => typeof s === 'string') : [];
+      // Fewer than two sections is not a loft; the node is dropped rather than
+      // loaded as something that can never evaluate.
+      if (sections.length >= 2) {
+        return { kind: 'loft', id, name: str(o['name']) || id, ...suppressed, sections, layer };
       }
       return null;
     }

@@ -187,6 +187,15 @@ export interface KernelModule {
     boreDiameter: number, boreDepth: number,
     tol: number, maxSeg: number,
   ): Float32Array;
+  /**
+   * Skin closed sections into one solid (work package 3.4). `frames` is nine
+   * floats per section — that section's plane — because the sections come from
+   * different sketches.
+   */
+  loft_mesh(
+    encoded: Float64Array, counts: Uint32Array, frames: Float64Array,
+    tol: number, maxSeg: number,
+  ): Float32Array;
   fillet(
     ax: number, ay: number, bx: number, by: number,
     cx: number, cy: number, dx: number, dy: number, radius: number,
@@ -1221,6 +1230,44 @@ export function holeMesh(
     spacingV,
     boreDiameter,
     boreDepth,
+    tol,
+    maxSeg,
+  );
+  const n = out.length > 0 ? out[0]! | 0 : 0;
+  if (n <= 0) return null;
+  return out.subarray(1, 1 + n * 6);
+}
+
+/**
+ * Loft closed sections into one solid (work package 3.4).
+ *
+ * Each section carries its **own plane** (`frame`, the same nine-float
+ * `origin, u, v` layout the extrude call takes) because the sections come from
+ * different sketches — that is the whole difference between a loft and an
+ * extrude, and the reason this call takes a list.
+ *
+ * `null` means the sections cannot bound a solid: fewer than two, one lying
+ * parallel to the loft direction, or one with no closed interior.
+ */
+export function loftMesh(
+  sections: ReadonlyArray<{ profile: Entity; frame: Float64Array }>,
+  tol = 0.05,
+  maxSeg = 256,
+): Float32Array | null {
+  if (sections.length < 2) return null;
+  const encoded: number[] = [];
+  const counts: number[] = [];
+  const frames: number[] = [];
+  for (const s of sections) {
+    const one = packOne(s.profile);
+    for (const v of one) encoded.push(v);
+    counts.push(encodedSize(s.profile));
+    for (const v of s.frame) frames.push(v);
+  }
+  const out = kernel().loft_mesh(
+    Float64Array.from(encoded),
+    Uint32Array.from(counts),
+    Float64Array.from(frames),
     tol,
     maxSeg,
   );

@@ -49,6 +49,7 @@ const FEATURE_GLYPH: Record<Feature['kind'], string> = {
   boolean: '⊖',
   hole: '⊚',
   pattern: '▦',
+  loft: '◭',
 };
 
 /** A boolean's glyph says *which* boolean — the row is the only place that shows it. */
@@ -70,6 +71,7 @@ const FEATURE_TITLE: Record<Feature['kind'], string> = {
   boolean: '布尔',
   hole: '孔',
   pattern: '阵列',
+  loft: '放样',
 };
 
 export default function FeatureTree(): React.ReactElement {
@@ -167,6 +169,7 @@ export default function FeatureTree(): React.ReactElement {
           —— 孔径 / 深度（0 = 通孔）/ 沉孔直径 / 沉孔深度，都双击改（沉孔直径填 0 就是不沉孔）。
           阵列：点孔那一行的 ▦ —— 默认一排 3 个；把第二方向的**数量**改成 2 就是一片孔阵。
           实例是**算出来的**：改源孔的 ⌀ 或深度，整片孔一起变。
+          放样：按 LOFT，点第一个截面 → 切到另一个基准面的草图 → 点第二个截面（两者必须在不同平面）。
         </p>
       </section>
     </div>
@@ -425,6 +428,13 @@ function TreeNodeRow(props: RowProps): React.ReactElement {
             {p.unit}
           </span>
         ),
+      )}
+      {feature.kind === 'loft' && (
+        // A loft's parameters are *references* to sections, not numbers, so the
+        // row says how many rather than offering an input for each.
+        <span className="tree-meta" title="截面（按顺序蒙皮）">
+          {feature.sections.length} 个截面
+        </span>
       )}
       {bad && <span className="tree-dot" title={props.error ?? '求值失败'} />}
       {off && <span className="tree-tag">已抑制</span>}

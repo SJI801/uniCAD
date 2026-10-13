@@ -10,7 +10,7 @@
  * automatically undoable.
  */
 
-import type { CadDocument, Entity, EntityId, ExtrudeFeature, LayerId, PlaneId, RevolveFeature, Vec2 } from '../core/types';
+import type { CadDocument, Entity, EntityId, ExtrudeFeature, LayerId, LoftFeature, PlaneId, RevolveFeature, Vec2 } from '../core/types';
 import type { Command } from '../core/history';
 import { command, addEntity, addFeature } from '../core/history';
 import { featureInsertIndex, findEntity, nextFeatureName, sketchOfEntity } from '../core/doc';
@@ -1375,6 +1375,118 @@ export class HoleTool extends BaseTool {
     // A 2D click is not a mistake to report — the user may simply be looking at
     // the 2D view. The prompt already says where the click has to land.
     return { preview: EMPTY_PREVIEW, done: false, prompt: this.initialPrompt };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// LOFT — skin two sections into a solid (work package 3.4)
+// ---------------------------------------------------------------------------
+
+/**
+ * Loft: pick one closed section, switch to the other's sketch, pick the second.
+ *
+ * **Two picks in two sketches, and that is the feature.** A loft is what turns
+ * "a small circle here, a big circle up there" into a tapered pipe, so the two
+ * sections live on different planes by construction — which is also why this is
+ * the first tool that expects the user to *switch sketches in the middle*: the
+ * first pick is kept while the second is made somewhere else. Editing either
+ * sketch afterwards re-skins the whole solid.
+ *
+ * Two sections is the common case; the document model already takes a list, so
+ * a chain of sections is a UI question rather than a kernel one.
+ */
+export class LoftTool extends BaseTool {
+  readonly id = 'loft';
+  readonly name = '放样';
+  readonly alias = 'LOFT';
+  readonly initialPrompt = 'LOFT 点第一个封闭截面（第二个截面的草图要在另一个基准面上）:';
+
+  private firstId: EntityId | null = null;
+
+  override activate(): void {
+    super.activate();
+    this.firstId = null;
+  }
+
+  override cancel(): void {
+    super.cancel();
+    this.firstId = null;
+  }
+
+  override anchor(): Vec2 | null {
+    // Picks name objects; neither is a placement.
+    return null;
+  }
+
+  override preview(): PreviewGeometry {
+    return EMPTY_PREVIEW;
+  }
+
+  handle(ev: ToolEvent, ctx: ToolContext): ToolResult {
+    if (
+      ev.kind === 'escape' ||
+      ev.kind === 'enter' ||
+      (ev.kind === 'click' && ev.button === 'right')
+    ) {
+      this.reset();
+      this.firstId = null;
+      return { preview: EMPTY_PREVIEW, done: true, prompt: this.initialPrompt };
+    }
+
+    if (ev.kind === 'click' && ev.button === 'left') {
+      const id = ctx.pick(ev.point);
+      if (!id) {
+        return { preview: EMPTY_PREVIEW, done: false, prompt: '没点到对象，请点在一个封闭轮廓上:' };
+      }
+      if (!this.firstId) {
+        this.firstId = id;
+        return {
+          preview: EMPTY_PREVIEW,
+          done: false,
+          prompt: 'LOFT 已选第一个截面 —— 切到另一个基准面的草图，点第二个截面:',
+        };
+      }
+      if (id === this.firstId) {
+        return { preview: EMPTY_PREVIEW, done: false, prompt: '第二个截面不能就是第一个，请点另一个轮廓:' };
+      }
+      const a = sketchOfEntity(ctx.doc, this.firstId);
+      const b = sketchOfEntity(ctx.doc, id);
+      if (!a || !b) {
+        return { preview: EMPTY_PREVIEW, done: false, prompt: '轮廓必须属于某张草图，请重新点:' };
+      }
+      // Two sections on one plane cannot bound a solid — the loft would have to
+      // go sideways inside its own sections. Caught here, while the user is
+      // still in the command, rather than as a red node afterwards.
+      if (a.plane === b.plane) {
+        return {
+          preview: EMPTY_PREVIEW,
+          done: false,
+          prompt: '两个截面在同一平面上 —— 先切到别的基准面（或新建一个偏移基准面）再画第二个截面:',
+        };
+      }
+      const sections = [this.firstId, id];
+      const feature: LoftFeature = {
+        kind: 'loft',
+        id: newFeatureId(),
+        name: nextFeatureName(ctx.doc, 'loft'),
+        sections,
+        layer: ctx.currentLayer(),
+      };
+      // Inserted right after the last section's sketch: both sections are
+      // sketches, and the tree reads "these two, then what was skinned between
+      // them".
+      ctx.commit(command('放样', addFeature(feature, featureInsertIndex(ctx.doc, b.id))));
+      this.firstId = null;
+      return { preview: EMPTY_PREVIEW, done: true, prompt: this.initialPrompt };
+    }
+
+    return {
+      preview: EMPTY_PREVIEW,
+      done: false,
+      prompt: this.firstId
+        ? 'LOFT 已选第一个截面 —— 切到另一个基准面的草图，点第二个截面:'
+        : this.initialPrompt,
+    };
   }
 }
 

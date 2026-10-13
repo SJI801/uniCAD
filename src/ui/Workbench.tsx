@@ -20,6 +20,7 @@ import {
   ExtrudeTool,
   HoleTool,
   LineTool,
+  LoftTool,
   MeasureTool,
   OffsetTool,
   PolylineTool,
@@ -63,6 +64,7 @@ function createTools(): Map<string, Tool> {
     new ExtrudeTool(),
     new RevolveTool(),
     new HoleTool(),
+    new LoftTool(),
     new MeasureTool(),
   ];
   return new Map(tools.map((t) => [t.id, t]));

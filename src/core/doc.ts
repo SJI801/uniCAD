@@ -314,6 +314,7 @@ export const FEATURE_LABEL: Record<Feature['kind'], string> = {
   boolean: '布尔',
   hole: '孔',
   pattern: '阵列',
+  loft: '放样',
 };
 
 /**

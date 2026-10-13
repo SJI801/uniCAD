@@ -1374,6 +1374,41 @@ pub fn hole_mesh(
     out
 }
 
+/// Loft a sequence of closed sections into one solid (work package 3.4).
+///
+/// `encoded`/`counts` carry one closed curve per section (the same flat wire as
+/// every other primitive call), and `frames` carries each section's plane as
+/// **nine floats** — `origin, u, v` — in the same order. Sections come from
+/// different sketches, so each has to say where *its* plane is; that is the
+/// whole difference between a loft and an extrude.
+///
+/// `vertexCount == 0` means the sections cannot bound a solid: fewer than two,
+/// a section parallel to the loft direction, or a section with no interior.
+#[wasm_bindgen]
+pub fn loft_mesh(
+    encoded: &[f64],
+    counts: &[u32],
+    frames: &[f64],
+    tol: f64,
+    max_seg: u32,
+) -> Vec<f32> {
+    let prims = decode_all(encoded, counts);
+    let mut sections: Vec<(Vec<crate::math::Vec2>, crate::mesh::Frame)> = Vec::new();
+    for (i, prim) in prims.iter().enumerate() {
+        let Some(frame) = frames.get(i * 9..i * 9 + 9).and_then(crate::mesh::Frame::from_slice) else {
+            continue;
+        };
+        if let Some(loop_pts) = crate::mesh::closed_loop(prim, tol, max_seg) {
+            sections.push((loop_pts, frame));
+        }
+    }
+    let m = crate::mesh::loft(&sections);
+    let mut out: Vec<f32> = Vec::with_capacity(1 + m.verts.len());
+    out.push(m.vertex_count() as f32);
+    out.extend_from_slice(&m.verts);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
