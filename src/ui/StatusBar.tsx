@@ -11,6 +11,7 @@ import { useEditor } from '../state/editorStore';
 import { ALIAS_TO_TOOL } from '../tools/registry';
 import { fmt, SNAP_KIND_LABEL, type ConstraintMode } from '../core/types';
 import { describeConstraint } from '../core/constraints';
+import { allEntities } from '../core/doc';
 
 export default function StatusBar(): React.ReactElement {
   const prompt = useEditor((s) => s.prompt);
@@ -215,10 +216,11 @@ export default function StatusBar(): React.ReactElement {
           </select>
         </span>
 
-        <span className="status-chip mono dim">图元 {doc.entities.length}</span>
+        <span className="status-chip mono dim">图元 {allEntities(doc).length}</span>
         {selection.size > 0 && <span className="status-chip accent">已选 {selection.size}</span>}
 
         <SketchStatusChip />
+        <FeatureStatusChip />
 
         <span className="status-spacer" />
 
@@ -305,6 +307,44 @@ function SketchStatusChip(): React.ReactElement | null {
       }}
     >
       {text}
+    </button>
+  );
+}
+
+/**
+ * 特征树错误 chip（阶段 1 · 1.2）：几个特征求值失败。
+ *
+ * 求值器把错误当**值**返回（轮廓被删、草图被删、类型尚未实现），这个 chip
+ * 是它们唯一的界面出口——树面板（1.4）还没来，但不能因此让用户对着一根
+ * 不出现的拉伸猜原因。`errorCount === 0` 时不画：没有错误就不占位置。
+ *
+ * 点一下把每条失败的原因写进日志，和草图状态 chip 同一理由：tooltip 放不下。
+ */
+function FeatureStatusChip(): React.ReactElement | null {
+  const featureEval = useEditor((s) => s.featureEval);
+  const pushLog = useEditor((s) => s.pushLog);
+  if (featureEval.errorCount === 0) return null;
+
+  const failed = featureEval.items.filter((i) => i.status === 'error');
+  const suppressed = featureEval.items.filter((i) => i.status === 'suppressed').length;
+  const tooltip = [
+    `${featureEval.errorCount} 个特征求值失败：`,
+    ...failed.map((i) => `  · ${i.error ?? i.feature.name}`),
+    suppressed > 0 ? `另有 ${suppressed} 个特征被抑制（不参与求值，也不画）。` : '',
+    '点击把详情写进下方日志。',
+  ]
+    .filter((s) => s !== '')
+    .join('\n');
+
+  return (
+    <button
+      className="status-chip mono err"
+      title={tooltip}
+      onClick={() => {
+        for (const i of failed) pushLog(`⚠ 特征: ${i.error ?? i.feature.name}`);
+      }}
+    >
+      特征错误 {featureEval.errorCount}
     </button>
   );
 }

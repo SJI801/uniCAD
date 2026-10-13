@@ -33,6 +33,7 @@ const store = new Map<string, string>();
 const { initKernel } = await import('./src/core/kernel');
 await initKernel();
 const { useEditor } = await import('./src/state/editorStore');
+const { allEntities, findEntity, sketchEntities } = await import('./src/core/doc');
 const {
   buildPieMenu,
   runPieAction,
@@ -74,13 +75,13 @@ const circle = (id: string, x: number, y: number, r: number, layer: string): Cir
 function install(entities: Entity[]): void {
   S().replaceDocument({ ...S().doc, entities, constraints: [], solids: [] });
 }
-const ent = (id: string): Entity => S().doc.entities.find((e) => e.id === id)!;
+const ent = (id: string): Entity => findEntity(S().doc, id)!;
 
 /** 与 CanvasView 里那段 JSX 同形的输入。 */
 function menu() {
   return buildPieMenu({
     doc: S().doc,
-    selected: S().doc.entities.filter((e) => S().selection.has(e.id)),
+    selected: sketchEntities(S().doc).filter((e) => S().selection.has(e.id)),
     activeTool: S().activeTool,
     view3d: S().view3d,
     report: S().constraintReport,
@@ -225,7 +226,7 @@ describe('饼菜单：动作真的落到 store 上', () => {
     install([line('l', 0, 0, 50, 0, layer), line('m', 60, 0, 90, 0, layer)]);
     S().select(['l']);
     runPieAction({ kind: 'delete' }, S());
-    expect(S().doc.entities.map((e) => e.id)).toEqual(['m']);
+    expect(allEntities(S().doc).map((e) => e.id)).toEqual(['m']);
   });
 
   it('视图开关与缩放到范围都能点（栅格/标注/约束标记/端点）', () => {

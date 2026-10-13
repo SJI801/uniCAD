@@ -24,6 +24,7 @@ const store = new Map<string, string>();
 const { initKernel } = await import('./src/core/kernel');
 await initKernel();
 const { useEditor } = await import('./src/state/editorStore');
+const { findEntity } = await import('./src/core/doc');
 const { canApply } = await import('./src/core/constraints');
 
 import type { CircleEntity, Entity, LineEntity, PolylineEntity } from './src/core/types';
@@ -69,7 +70,7 @@ const rect = (id: string, layer: string): PolylineEntity => ({
 function install(entities: Entity[]): void {
   S().replaceDocument({ ...S().doc, entities, constraints: [], solids: [] });
 }
-const ent = (id: string): Entity => S().doc.entities.find((e) => e.id === id)!;
+const ent = (id: string): Entity => findEntity(S().doc, id)!;
 
 /** 圆心到直线支撑线的垂距（带符号）。 */
 function signedDist(l: LineEntity, p: { x: number; y: number }): number {

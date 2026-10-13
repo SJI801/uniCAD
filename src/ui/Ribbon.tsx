@@ -21,6 +21,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'rea
 import { useEditor } from '../state/editorStore';
 import { packOsnapMask, SNAP_KIND_LABEL, type ConstraintKind, type OsnapMode } from '../core/types';
 import { canApply, CONSTRAINT_GLYPH, CONSTRAINT_LABEL, CONSTRAINT_ORDER } from '../core/constraints';
+import { sketchEntities } from '../core/doc';
 import { TOOL_SPECS } from '../tools/registry';
 
 const OSNAP_ORDER: OsnapMode[] = [
@@ -173,8 +174,13 @@ export default function Ribbon(props: RibbonProps): React.ReactElement {
   // worse answer than a menu that already said no.
 
   const selectedEntities = useMemo(
-    () => doc.entities.filter((e) => selection.has(e.id)),
-    [doc.entities, selection],
+    () => sketchEntities(doc).filter((e) => selection.has(e.id)),
+    // `doc` is a fresh object on every store write (all writes are
+    // `doc: { ...doc }`), so this recomputes on every edit — which is what
+    // fixes the staleness the old flat-array key had: the patch layer mutates
+    // the entity arrays in place, so the array reference never changed and
+    // the memo kept serving pre-edit entities.
+    [doc, selection],
   );
   const selectedConstraintCount = useMemo(
     () =>

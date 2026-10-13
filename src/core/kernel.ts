@@ -18,6 +18,7 @@
 import type {
   Aabb,
   ArcEntity,
+  BooleanFeature,
   CircleEntity,
   EllipseEntity,
   Entity,
@@ -150,6 +151,40 @@ export interface KernelModule {
   extrude_mesh(
     encoded: Float64Array, counts: Uint32Array,
     height: number, frame: Float64Array, tol: number, maxSeg: number,
+  ): Float32Array;
+  /**
+   * Lathe a closed profile about an axis **in its own plane**.
+   *
+   * `axis` is `[px, py, dx, dy]` in the sketch's 2D coordinates. Same wire
+   * format and same `vertexCount === 0` meaning as `extrude_mesh`: here zero
+   * means "not a valid solid of revolution" (the profile touches or crosses the
+   * axis), which the caller reports as a modelling error.
+   */
+  revolve_mesh(
+    encoded: Float64Array, counts: Uint32Array,
+    axis: Float64Array, angle: number,
+    frame: Float64Array, tol: number, maxSeg: number,
+  ): Float32Array;
+  /**
+   * Boolean of two flat-shaded meshes, both in world space. `op` is one of the
+   * codes in `BOOL_OP`; an unknown code comes back empty rather than panicking.
+   *
+   * Returns the same wire format; `vertexCount === 0` means the result has no
+   * surface, which the caller reports in words rather than drawing nothing.
+   */
+  boolean_mesh(a: Float32Array, b: Float32Array, op: number): Float32Array;
+  /**
+   * Nearest hit of an eye ray against one mesh. Empty when the ray misses;
+   * otherwise `[t, x, y, z, nx, ny, nz]` — the stored (visible) face normal,
+   * which is what a hole's axis must follow.
+   */
+  pick_mesh(mesh: Float32Array, origin: Float64Array, dir: Float64Array): Float64Array;
+  /** Drill one hole, a row, or a grid — see `subtract_hole_grid` in the kernel. */
+  hole_mesh(
+    solid: Float32Array, point: Float64Array, normal: Float64Array,
+    diameter: number, depth: number,
+    countU: number, spacingU: number, countV: number, spacingV: number,
+    tol: number, maxSeg: number,
   ): Float32Array;
   fillet(
     ax: number, ay: number, bx: number, by: number,
@@ -1039,6 +1074,147 @@ export function extrudeMesh(
     new Uint32Array([encodedSize(profile)]),
     height,
     frame,
+    tol,
+    maxSeg,
+  );
+  const n = out.length > 0 ? out[0]! | 0 : 0;
+  if (n <= 0) return null;
+  return out.subarray(1, 1 + n * 6);
+}
+
+/**
+ * Lathe a closed profile around an axis **in its own plane** (work package 3.1).
+ *
+ * `axisPoint`/`axisDir` are in the sketch's own 2D coordinates — that is where
+ * both the profile and the centreline were drawn, and it is the only frame the
+ * caller has. Returns `null` when the kernel refuses the profile: not closed,
+ * or touching/crossing the axis so the sweep would fold through itself. That
+ * `null` is a modelling error the evaluator turns into a visible one — never an
+ * empty mesh passed off as a success.
+ */
+export function revolveMesh(
+  profile: Entity,
+  axisPoint: Vec2,
+  axisDir: Vec2,
+  angle: number,
+  frame: Float64Array,
+  tol = 0.05,
+  maxSeg = 256,
+): Float32Array | null {
+  const axis = Float64Array.from([axisPoint.x, axisPoint.y, axisDir.x, axisDir.y]);
+  const out = kernel().revolve_mesh(
+    packOne(profile),
+    new Uint32Array([encodedSize(profile)]),
+    axis,
+    angle,
+    frame,
+    tol,
+    maxSeg,
+  );
+  const n = out.length > 0 ? out[0]! | 0 : 0;
+  if (n <= 0) return null;
+  return out.subarray(1, 1 + n * 6);
+}
+
+/**
+ * Boolean operation codes — mirrors `OP_*` in `kernel/src/boolean.rs`, the same
+ * way `TRIM_TAG` mirrors the trim codes in `ffi.rs`. Two sides of an FFI need
+ * one shared vocabulary, and a name here beats a bare `2` at the call site.
+ */
+export const BOOL_OP: Record<BooleanFeature['op'], number> = {
+  subtract: 0,
+  union: 1,
+  intersect: 2,
+};
+
+/**
+ * Boolean of two flat-shaded meshes (work packages 2.1 / 2.2).
+ *
+ * Both operands are world-space triangle soups — the evaluator hands over two
+ * features' meshes — and the result comes back in the same format, ready to
+ * draw or to feed into another boolean.
+ *
+ * `null` means the result has **no surface**: an operand was empty, the cutter
+ * swallowed the target, or (for an intersection) the two never touch. All three
+ * are legitimate outcomes of legal operations, and the evaluator says which one
+ * it was in words rather than drawing nothing.
+ */
+export function booleanMesh(
+  a: Float32Array,
+  b: Float32Array,
+  op: BooleanFeature['op'],
+): Float32Array | null {
+  const out = kernel().boolean_mesh(a, b, BOOL_OP[op]);
+  const n = out.length > 0 ? out[0]! | 0 : 0;
+  if (n <= 0) return null;
+  return out.subarray(1, 1 + n * 6);
+}
+
+/** One face hit by an eye ray (work package 3.2). */
+export interface MeshHit {
+  /** Distance along the ray direction. */
+  t: number;
+  /** Hit point, world space. */
+  point: [number, number, number];
+  /** The face's outward normal — the stored flat-shading normal, i.e. what is drawn. */
+  normal: [number, number, number];
+}
+
+/**
+ * Nearest face of `mesh` along an eye ray, or `null`.
+ *
+ * The ray itself comes from `screenRay` in the render layer — building it from
+ * the camera basis is a camera concern. The intersection is *geometry*, so it
+ * lives in the kernel next to the 2D picker, for the same reason that one does.
+ */
+export function pickMesh(
+  mesh: Float32Array,
+  origin: readonly [number, number, number],
+  dir: readonly [number, number, number],
+): MeshHit | null {
+  const out = kernel().pick_mesh(mesh, Float64Array.from(origin), Float64Array.from(dir));
+  if (out.length < 7) return null;
+  return {
+    t: out[0]!,
+    point: [out[1]!, out[2]!, out[3]!],
+    normal: [out[4]!, out[5]!, out[6]!],
+  };
+}
+
+/**
+ * Drill a hole into `solid`: the kernel builds the cylindrical cutter from the
+ * face and subtracts it, so no part of "which way does the axis point" has to
+ * be agreed on twice.
+ *
+ * `depth === 0` means through. `countU × countV` drills a **grid** on the face's
+ * own in-plane axes, `spacingU`/`spacingV` apart, the first at `point` — one
+ * cutter soup, one boolean pass, however many instances.
+ *
+ * `null` means the cut left no solid at all.
+ */
+export function holeMesh(
+  solid: Float32Array,
+  point: readonly [number, number, number],
+  normal: readonly [number, number, number],
+  diameter: number,
+  depth: number,
+  countU = 1,
+  spacingU = 0,
+  countV = 1,
+  spacingV = 0,
+  tol = 0.05,
+  maxSeg = 256,
+): Float32Array | null {
+  const out = kernel().hole_mesh(
+    solid,
+    Float64Array.from(point),
+    Float64Array.from(normal),
+    diameter,
+    depth,
+    countU,
+    spacingU,
+    countV,
+    spacingV,
     tol,
     maxSeg,
   );

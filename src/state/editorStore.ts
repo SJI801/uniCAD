@@ -12,35 +12,50 @@
 import { create } from 'zustand';
 import { DEFAULT_ORBIT, type OrbitState } from '../render/orbit';
 import type {
+  BooleanFeature,
   CadDocument,
   ConstraintKind,
   ConstraintMode,
   Entity,
   EntityId,
+  Feature,
+  FeatureId,
+  HoleFeature,
   Layer,
   LayerId,
   OsnapMode,
+  PatternFeature,
+  Sketch,
+  SketchId,
   Vec2,
 } from '../core/types';
 import {
   createEmptyDocument,
   DEFAULT_OSNAP_MODES,
   fmt,
-  planeOf,
 } from '../core/types';
+import { allEntities, emptySketch, ensureV2, featuresOf, findEntity, findSketch, nextFeatureName, nextSketchName, sketchEntities, sketchOfEntity, sketchOfPlane, sketchRefOf, sketchesOf } from '../core/doc';
+import { evaluate, type EvalResult } from '../core/evaluate';
+import { newFeatureId } from '../core/entities';
 import {
   CommandHistory,
+  activateSketchPatches,
   addConstraint,
   addEntity,
+  addFeature,
   addFrame,
   addPlane,
+  addSketch,
   command,
   removeConstraint,
+  removeFeature,
+  removeSketch,
   updateConstraint,
+  updateFeature,
+  updateSketch,
   removeFrame,
   removeManyCommand,
   removePlane,
-  setActivePlanePatch,
   updateEntity,
   updateLayer,
   addLayer,
@@ -178,6 +193,17 @@ export interface EditorState {
    */
   constraintReport: ConstraintReport | null;
   /**
+   * 特征树求值结果（阶段 1 · 1.2）：每个特征的三角形 + 状态。每个**真命令**
+   * 重算一次（`__` 预览命令不重算，与 constraintReport 同一理由），渲染循环
+   * 直接消费，不再有逐帧网格缓存——「算了不画」正是那个缓存的名字。
+   */
+  featureEval: EvalResult;
+  /**
+   * 特征树里选中的特征（1.4）。它与图元选择集是两回事：图元选择服务 2D 编辑，
+   * 这个服务 3D 高亮——点树上的一行拉伸，那个实体的网格换成选中色。
+   */
+  selectedFeature: FeatureId | null;
+  /**
    * Whether the top ribbon is folded down to a single compact row.
    *
    * In the store rather than in `Ribbon`'s local state for two reasons: the
@@ -200,6 +226,43 @@ export interface EditorState {
   duplicateSelection(offset: Vec2): void;
   transformSelection(fn: (e: Entity) => Entity, label: string): void;
   updateEntityById(id: EntityId, fn: (e: Entity) => Entity, label: string): void;
+  /**
+   * 编辑树上一个特征（重命名 / 改高度 / 抑制）——形状与 `updateEntityById`
+   * 一致：调用方给「当前特征 → 新特征」的函数，整次编辑合成一条命令。
+   * `fn` 拿的是**当前**特征而不是闭包里的旧对象，半路改两次不会回滚中间那次。
+   */
+  updateFeatureById(id: FeatureId, fn: (f: Feature) => Feature, label: string): void;
+  /** 重命名草图。名字只是界面标签，几何不读它。 */
+  updateSketchById(id: SketchId, fn: (s: Sketch) => Sketch, label: string): void;
+  /** 删除一个特征节点。草图与图元不受影响。 */
+  deleteFeature(id: FeatureId): void;
+  /**
+   * 布尔差：从 `a` 里挖掉 `b`。
+   *
+   * 新节点插在**两个算子之后**——树序即求值序，算子必须先算完才轮得到它。
+   * 这条插入规则同时就是无环的证明：每个算子都在自己之前，所以引用链不可能绕回来。
+   */
+  booleanSubtract(a: FeatureId, b: FeatureId): void;
+  /**
+   * 在实体表面打一个孔（3.2）。`at`/`normal` 来自 3D 视图里那次点击的面拾取，
+   * 只在这一刻记录一次 —— 孔的位置就钉在这两个数上，跟别的特征一样可撤销、可改参数。
+   */
+  drillHole(
+    solid: FeatureId,
+    at: [number, number, number],
+    normal: [number, number, number],
+    diameter: number,
+    depth: number,
+  ): void;
+  /**
+   * 以某个孔为源做阵列（3.6）。默认 3 个、间距 10 —— 先给一个看得见的结果，
+   * 参数在树上改。「改源孔，阵列孔全变」是特征级阵列的全部理由。
+   */
+  patternFeature(source: FeatureId): void;
+  /** 删除一张草图——会丢东西时拒绝并说明（见实现里的三条）。 */
+  deleteSketch(id: SketchId): void;
+  /** 选中/取消选中一个特征：3D 视图把它画成选中色。 */
+  selectFeature(id: FeatureId | null): void;
   /**
    * 改值即驱动：面板上敲的一个**尺寸**（半径 / 直径 / 长度）写成持久约束。
    *
@@ -279,6 +342,12 @@ export interface EditorState {
   setFrameVisible(id: string, visible: boolean): void;
   /** Make `id` the plane new sketches are drawn on (undoable). */
   setActivePlane(id: PlaneId): void;
+  /**
+   * Switch the sketch being edited (and the plane with it). The feature-tree
+   * panel's entry point; `setActivePlane` is the plane-first spelling of the
+   * same move.
+   */
+  setActiveSketch(id: SketchId): void;
   /** Add a coordinate system sitting on the active plane. Returns its id. */
   addFrameOnActivePlane(): string | null;
   /** Delete a user frame. The world frame cannot be removed. */
@@ -354,10 +423,19 @@ const FULLY_CONSTRAINED_KEY = 'unicad.ui.fullyConstrained';
  * been stored, so an explicit Ctrl+F1 or click always wins and is remembered.
  *
  * 加控件就要跟着调这个数 —— 它必须 ≥ 展开态的实际内容宽，否则会出现
- * 「默认展开、但根本放不下」。加了「约束」分组(2140)、「修剪」工具(2210)与
- * 「交点分解」按钮(2280)后三次上调。
+ * 「默认展开、但根本放不下」。加了「约束」分组(2140)、「修剪」工具(2210)、
+ * 「交点分解」按钮(2280) 与「旋转」工具(2340)、「打孔」工具(2400) 后五次上调。
  */
-const RIBBON_AUTO_COLLAPSE_BELOW = 2280;
+const RIBBON_AUTO_COLLAPSE_BELOW = 2400;
+
+/**
+ * What a fresh pattern starts as: three instances 10 mm apart. Enough that the
+ * user sees a row rather than a lone hole, and both numbers are one double-click
+ * away in the tree — a dialog asking "how many?" before anything exists would be
+ * asking about a thing the user has not seen.
+ */
+const DEFAULT_PATTERN_COUNT = 3;
+const DEFAULT_PATTERN_SPACING = 10;
 
 /**
  * Read a stickily-saved UI flag.
@@ -476,6 +554,8 @@ export const useEditor = create<EditorState>((set, get) => ({
   sketchColors: readUiFlag(SKETCH_COLORS_KEY, false),
   fullyConstrained: readUiFlag(FULLY_CONSTRAINED_KEY, false),
   constraintReport: null,
+  featureEval: evaluate(createEmptyDocument()),
+  selectedFeature: null,
   ribbonCollapsed: readUiFlag(
     RIBBON_COLLAPSED_KEY,
     window.innerWidth < RIBBON_AUTO_COLLAPSE_BELOW,
@@ -486,16 +566,23 @@ export const useEditor = create<EditorState>((set, get) => ({
   // -------------------------------------------------------------------------
 
   replaceDocument(doc, options) {
+    // The store only ever holds tree-shaped documents: anything handed in with
+    // a flat `entities` array (a v1 decode, a hand-built object) is rebuilt
+    // here, so no reader downstream has to know v1 existed. Idempotent — a
+    // document that already has `nodes` passes through untouched.
+    const next = ensureV2(doc);
     if (options?.resetHistory !== false) {
       history = new CommandHistory();
     }
     set({
-      doc,
+      doc: next,
       selection: new Set(),
       hover: null,
+      selectedFeature: null,
       dirty: false,
       history: historyInfo(history),
-      constraintReport: analyzeDocument(doc),
+      constraintReport: analyzeDocument(next),
+      featureEval: evaluate(next),
     });
   },
 
@@ -503,7 +590,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     try {
       const result: LoadResult = deserializeDocument(text);
       get().replaceDocument(result.doc);
-      get().pushLog(`已载入 "${result.doc.meta.title}" (${result.doc.entities.length} 个图元)`);
+      get().pushLog(`已载入 "${result.doc.meta.title}" (${allEntities(result.doc).length} 个图元)`);
       for (const w of result.warnings) get().pushLog(`⚠ ${w}`);
       return { warnings: result.warnings };
     } catch (e) {
@@ -531,16 +618,24 @@ export const useEditor = create<EditorState>((set, get) => ({
       // 命令边界重算自由度报告。`__` 是实时预览（拖动每帧一次），那份开销不值得：
       // 松手时那条真命令会算。报告因此可能在拖动中落后一帧——松手即准。
       constraintReport: cmd.label.startsWith('__') ? get().constraintReport : analyzeDocument(doc),
+      // 特征求值同一条边界：预览命令不重算（3D 视图在拖动中保持松手前的样子，
+      // 真命令一到就准），`evaluate` 的返回值身份就是渲染循环的缓存键。
+      featureEval: cmd.label.startsWith('__') ? get().featureEval : evaluate(doc),
     });
     const { selection, hover } = get();
     if (selection.size > 0 || hover) {
-      const alive = new Set(doc.entities.map((e) => e.id));
+      const alive = new Set(allEntities(doc).map((e) => e.id));
       const nextSel = new Set([...selection].filter((id) => alive.has(id)));
       const nextHover = hover && alive.has(hover) ? hover : null;
       if (nextSel.size !== selection.size || nextHover !== hover) {
         set({ selection: nextSel, hover: nextHover });
       }
     }
+    // A selected feature that no longer exists would leave the 3D highlight
+    // pointing at nothing while its tree row is gone — same posture as pruning
+    // the entity selection above.
+    const picked = get().selectedFeature;
+    if (picked && !featuresOf(doc).some((f) => f.id === picked)) set({ selectedFeature: null });
   },
 
   undo() {
@@ -550,7 +645,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       get().pushLog('没有可撤销的操作');
       return;
     }
-    const alive = new Set(doc.entities.map((e) => e.id));
+    const alive = new Set(allEntities(doc).map((e) => e.id));
     set({
       doc: { ...doc },
       history: historyInfo(history),
@@ -558,8 +653,14 @@ export const useEditor = create<EditorState>((set, get) => ({
       selection: new Set([...get().selection].filter((id) => alive.has(id))),
       hover: get().hover && alive.has(get().hover!) ? get().hover : null,
       constraintReport: analyzeDocument(doc),
+      featureEval: evaluate(doc),
     });
     get().pushLog(`已撤销: ${cmd.label}`);
+    // A selected feature that no longer exists would leave the 3D highlight
+    // pointing at nothing while its tree row is gone — same posture as pruning
+    // the entity selection above.
+    const picked = get().selectedFeature;
+    if (picked && !featuresOf(doc).some((f) => f.id === picked)) set({ selectedFeature: null });
   },
 
   redo() {
@@ -574,6 +675,7 @@ export const useEditor = create<EditorState>((set, get) => ({
       history: historyInfo(history),
       dirty: true,
       constraintReport: analyzeDocument(doc),
+      featureEval: evaluate(doc),
     });
     get().pushLog(`已重做: ${cmd.label}`);
   },
@@ -584,7 +686,10 @@ export const useEditor = create<EditorState>((set, get) => ({
 
   addEntities(entities, label = '添加图元') {
     if (entities.length === 0) return;
-    const cmd = command(label, ...entities.map(addEntity));
+    // New entities land in the sketch being edited — the patch carries the id,
+    // so an undo after switching sketches still removes them from the right
+    // place.
+    const cmd = command(label, ...entities.map((e) => addEntity(get().doc.activeSketch, e)));
     get().run(cmd);
     set({ selection: new Set(entities.map((e) => e.id)) });
   },
@@ -594,7 +699,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     if (selection.size === 0) return;
     // Skip locked entities rather than silently deleting them.
     const deletable = [...selection].filter((id) => {
-      const e = doc.entities.find((x) => x.id === id);
+      const e = findEntity(doc, id);
       return e ? isPickable(doc, e) : false;
     });
     if (deletable.length === 0) {
@@ -611,7 +716,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     const { selection, doc } = get();
     if (selection.size === 0) return;
     const copies: Entity[] = [];
-    for (const e of doc.entities) {
+    for (const e of sketchEntities(doc)) {
       if (!selection.has(e.id)) continue;
       const c = cloneEntity(e);
       translateEntity(c, offset);
@@ -626,7 +731,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     const { selection, doc } = get();
     if (selection.size === 0) return;
     const edits: Entity[] = [];
-    for (const e of doc.entities) {
+    for (const e of sketchEntities(doc)) {
       if (!selection.has(e.id) || !isPickable(doc, e)) continue;
       edits.push(fn(e));
     }
@@ -637,7 +742,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     // 完全定义：先算出来再判「这次变换到底动不动几何」。只比几何（`shapeEquals`），
     // 所以锁住之后改颜色、换图层仍然照做——锁的是形状，不是整条记录。
     const moved = edits.some((after) => {
-      const before = doc.entities.find((e) => e.id === after.id);
+      const before = findEntity(doc, after.id);
       return before !== undefined && !shapeEquals(before, after);
     });
     if (moved && refusesGeometryEdit(get(), '变换', label)) return;
@@ -650,7 +755,7 @@ export const useEditor = create<EditorState>((set, get) => ({
 
   updateEntityById(id, fn, label) {
     const { doc } = get();
-    const before = doc.entities.find((e) => e.id === id);
+    const before = findEntity(doc, id);
     if (!before) return;
     const after = fn(before);
 
@@ -673,6 +778,178 @@ export const useEditor = create<EditorState>((set, get) => ({
     get().run(command(label, ...patches));
   },
 
+  // -------------------------------------------------------------------------
+  // Feature tree (work package 1.4)
+  // -------------------------------------------------------------------------
+
+  updateFeatureById(id, fn, label) {
+    const doc = get().doc;
+    const before = featuresOf(doc).find((f) => f.id === id);
+    if (!before) return;
+    const after = fn(before);
+    // Identity check, not deep equality: every edit below builds a new object,
+    // and "same object back" means the caller decided nothing changed.
+    if (after === before) return;
+    get().run(command(label, updateFeature(before, after)));
+  },
+
+  updateSketchById(id, fn, label) {
+    const doc = get().doc;
+    const before = findSketch(doc, id);
+    if (!before) return;
+    const after = fn(before);
+    if (after === before) return;
+    get().run(command(label, updateSketch(before, after)));
+  },
+
+  deleteFeature(id) {
+    const doc = get().doc;
+    const feature = featuresOf(doc).find((f) => f.id === id);
+    const patch = removeFeature(doc, id);
+    if (!patch || !feature) return;
+    get().run(command('删除特征', patch));
+    if (get().selectedFeature === id) set({ selectedFeature: null });
+    get().pushLog(`已删除特征「${feature.name}」`);
+  },
+
+  /**
+   * 删除一张草图——三条拒绝，与 `deletePlane` 同一姿态（拒绝并说明，不级联）：
+   *
+   * 1. 文档至少要留一张草图，否则新图元没有宿主；
+   * 2. 草图里还有图元，那是用户明确画下的几何——要删就先把图元删掉；
+   * 3. 草图被特征引用（拉伸的轮廓就在里面），级联删特征会丢掉用户看不见
+   *    代价的东西（ROADMAP 原文是「删除中间特征，后续特征跟着消失」的反面：
+   *    没有下游依赖的特征，删除就是删除）。
+   */
+  deleteSketch(id) {
+    const doc = get().doc;
+    const sketch = findSketch(doc, id);
+    if (!sketch) return;
+    const all = sketchesOf(doc);
+    if (all.length <= 1) {
+      get().pushLog('这是最后一张草图，删掉它新图元就没有宿主了。');
+      return;
+    }
+    if (sketch.entities.length > 0) {
+      get().pushLog(`「${sketch.name}」里还有 ${sketch.entities.length} 个图元，先删掉图元再删草图。`);
+      return;
+    }
+    // Direct sketch references only — a boolean names features and a hole names
+    // a solid, so their tie to a sketch is transitive (`sketchRefOf`).
+    const refs = sketch ? featuresOf(doc).filter((f) => sketchRefOf(f) === sketch.id).length : 0;
+    if (refs > 0) {
+      get().pushLog(`「${sketch.name}」被 ${refs} 个特征引用，先删掉那些特征再删草图。`);
+      return;
+    }
+    const patches: Patch[] = [];
+    if (doc.activeSketch === id) {
+      // Switching away is folded into the same command, so one undo brings the
+      // sketch back *and* restores what was being edited.
+      const next = all.find((s) => s.id !== id)!;
+      patches.push(
+        ...activateSketchPatches(
+          { sketch: doc.activeSketch, plane: doc.activePlane },
+          { sketch: next.id, plane: next.plane },
+        ),
+      );
+    }
+    const p = removeSketch(doc, id);
+    if (p) patches.push(p);
+    if (patches.length > 0) get().run(command('删除草图', ...patches));
+    get().pushLog(`已删除草图「${sketch.name}」`);
+  },
+
+  selectFeature(id) {
+    if (get().selectedFeature === id) return;
+    set({ selectedFeature: id });
+  },
+
+  booleanSubtract(a, b) {
+    const doc = get().doc;
+    if (a === b) {
+      get().pushLog('不能用一个特征减去它自己。');
+      return;
+    }
+    const fa = featuresOf(doc).find((f) => f.id === a);
+    const fb = featuresOf(doc).find((f) => f.id === b);
+    const idxA = doc.nodes.findIndex((n) => n.kind === 'feature' && n.feature.id === a);
+    const idxB = doc.nodes.findIndex((n) => n.kind === 'feature' && n.feature.id === b);
+    if (!fa || !fb || idxA < 0 || idxB < 0) return;
+    const feature: BooleanFeature = {
+      kind: 'boolean',
+      id: newFeatureId(),
+      name: nextFeatureName(doc, 'boolean'),
+      op: 'subtract',
+      a,
+      b,
+      // The result wears the base solid's layer: the hole belongs to *that*
+      // body, and colouring it like the cutter would say the opposite.
+      layer: fa.layer,
+    };
+    // Right after the later operand, so both are already evaluated when this
+    // node is reached.
+    get().run(command('布尔差', addFeature(feature, Math.max(idxA, idxB) + 1)));
+    get().pushLog(`布尔差：${fa.name} − ${fb.name}`);
+  },
+
+  drillHole(solid, at, normal, diameter, depth) {
+    const doc = get().doc;
+    const idx = doc.nodes.findIndex((n) => n.kind === 'feature' && n.feature.id === solid);
+    const base = featuresOf(doc).find((f) => f.id === solid);
+    if (idx < 0 || !base) return;
+    const feature: HoleFeature = {
+      kind: 'hole',
+      id: newFeatureId(),
+      name: nextFeatureName(doc, 'hole'),
+      solid,
+      at,
+      normal,
+      diameter,
+      depth,
+      // A hole belongs to the body it was drilled into.
+      layer: base.layer,
+    };
+    // Right after that body, so its mesh is already evaluated when this node is
+    // reached — and so the tree reads as "this solid, then what was done to it".
+    get().run(command('打孔', addFeature(feature, idx + 1)));
+    get().pushLog(
+      `孔：⌀${diameter} × ${depth > 0 ? `${depth} mm` : '通孔'}，打在「${base.name}」上`,
+    );
+  },
+
+  patternFeature(source) {
+    const doc = get().doc;
+    const idx = doc.nodes.findIndex((n) => n.kind === 'feature' && n.feature.id === source);
+    const src = featuresOf(doc).find((f) => f.id === source);
+    if (idx < 0 || !src) return;
+    // Only a hole can be repeated today: the pattern re-reads its source's
+    // parameters, and a hole is the one kind whose parameters fully describe
+    // where the geometry sits. Saying so beats repeating something else badly.
+    if (src.kind !== 'hole') {
+      get().pushLog('目前只有孔能被阵列。');
+      return;
+    }
+    const feature: PatternFeature = {
+      kind: 'pattern',
+      id: newFeatureId(),
+      name: nextFeatureName(doc, 'pattern'),
+      source,
+      count: DEFAULT_PATTERN_COUNT,
+      spacing: DEFAULT_PATTERN_SPACING,
+      // One row until asked otherwise; the V spacing is already filled in, so
+      // typing "2" into the second count makes a grid with no further thought.
+      countV: 1,
+      spacingV: DEFAULT_PATTERN_SPACING,
+      layer: src.layer,
+    };
+    // Right after its source, so the source's mesh is evaluated by the time this
+    // node is reached — the same rule every dependent feature follows.
+    get().run(command('阵列', addFeature(feature, idx + 1)));
+    get().pushLog(
+      `阵列：以「${src.name}」为源，${DEFAULT_PATTERN_COUNT} 个、间距 ${DEFAULT_PATTERN_SPACING} mm（参数在树上改）`,
+    );
+  },
+
   /**
    * 改值即驱动 —— ROADMAP 0.2。
    *
@@ -690,7 +967,7 @@ export const useEditor = create<EditorState>((set, get) => ({
    */
   setDimensionAction(entityId, kind, value, fn, label) {
     const { doc } = get();
-    const before = doc.entities.find((e) => e.id === entityId);
+    const before = findEntity(doc, entityId);
     if (!before) return;
 
     // 半径 / 直径 / 长度都没有 0 的意义（0 长度的线、0 半径的圆不是图形）。
@@ -727,11 +1004,13 @@ export const useEditor = create<EditorState>((set, get) => ({
     }
     moving.delete(entityId);
 
-    const patches: Patch[] = [updateEntity(before, edited)];
+    const patches: Patch[] = [updateEntity(sketchIdOf(doc, before.id), before, edited)];
     patches.push(existing ? updateConstraint(existing, made) : addConstraint(made));
     for (const solved of solveAfterEdit(shadow, [edited], [...moving])) {
-      const was = doc.entities.find((e) => e.id === solved.id);
-      if (was && !geometryEquals(was, solved)) patches.push(updateEntity(was, solved));
+      const was = findEntity(doc, solved.id);
+      if (was && !geometryEquals(was, solved)) {
+        patches.push(updateEntity(sketchIdOf(doc, solved.id), was, solved));
+      }
     }
 
     get().run(command(label, ...patches));
@@ -748,7 +1027,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     // 几何，那就越过了这把锁。想加就先关掉「完全定义」。
     const isDimension = DIMENSIONAL_CONSTRAINTS.has(kind);
     if (!isDimension && refusesGeometryEdit(get(), `「${CONSTRAINT_LABEL[kind]}」约束`)) return;
-    const entities = doc.entities.filter((e) => selection.has(e.id));
+    const entities = sketchEntities(doc).filter((e) => selection.has(e.id));
     const built = buildConstraints(kind, entities);
     if (!built.constraints || built.constraints.length === 0) {
       get().pushLog(`无法添加「${CONSTRAINT_LABEL[kind]}」：${built.reason ?? '所选对象不适用'}`);
@@ -774,8 +1053,10 @@ export const useEditor = create<EditorState>((set, get) => ({
 
     const patches: Patch[] = fresh.map(addConstraint);
     for (const solved of solveConstraints(shadow, moving)) {
-      const before = doc.entities.find((e) => e.id === solved.id);
-      if (before && !geometryEquals(before, solved)) patches.push(updateEntity(before, solved));
+      const before = findEntity(doc, solved.id);
+      if (before && !geometryEquals(before, solved)) {
+        patches.push(updateEntity(sketchIdOf(doc, solved.id), before, solved));
+      }
     }
 
     get().run(command(`添加约束: ${CONSTRAINT_LABEL[kind]}`, ...patches));
@@ -811,8 +1092,10 @@ export const useEditor = create<EditorState>((set, get) => ({
 
     const patches: Patch[] = [updateConstraint(target, after)];
     for (const solved of solveConstraints(shadow, moving)) {
-      const before = doc.entities.find((e) => e.id === solved.id);
-      if (before && !geometryEquals(before, solved)) patches.push(updateEntity(before, solved));
+      const before = findEntity(doc, solved.id);
+      if (before && !geometryEquals(before, solved)) {
+        patches.push(updateEntity(sketchIdOf(doc, solved.id), before, solved));
+      }
     }
 
     const shown =
@@ -915,8 +1198,8 @@ export const useEditor = create<EditorState>((set, get) => ({
     const { doc } = get();
     // Only the active plane's sketches: selecting an entity this view cannot
     // even draw would put handles on nothing.
-    const ids = doc.entities
-      .filter((e) => isPickable(doc, e) && planeOf(e) === doc.activePlane)
+    const ids = sketchEntities(doc)
+      .filter((e) => isPickable(doc, e))
       .map((e) => e.id);
     set({ selection: new Set(ids) });
     get().pushLog(`已选择 ${ids.length} 个对象`);
@@ -1094,7 +1377,7 @@ export const useEditor = create<EditorState>((set, get) => ({
     }
     const layer = doc.layers.find((l) => l.id === id);
     if (!layer) return;
-    const inUse = doc.entities.filter((e) => e.layer === id).length;
+    const inUse = allEntities(doc).filter((e) => e.layer === id).length;
     if (inUse > 0) {
       get().pushLog(`图层 "${layer.name}" 上还有 ${inUse} 个对象，无法删除`);
       return;
@@ -1244,10 +1527,42 @@ export const useEditor = create<EditorState>((set, get) => ({
     if (doc.activePlane === id) return;
     const plane = doc.planes.find((p) => p.id === id);
     if (!plane) return;
+    // One plane = one sketch, so switching the plane means switching to that
+    // plane's sketch — creating an empty one first if this plane has never
+    // been drawn on (a fresh offset plane, say). Without the sketch there
+    // would be nothing for new entities to land in.
+    const patches: Patch[] = [];
+    let sketch = sketchOfPlane(doc, id);
+    if (!sketch) {
+      sketch = emptySketch(id, nextSketchName(doc));
+      patches.push(addSketch(sketch, doc.nodes.length));
+    }
+    patches.push(
+      ...activateSketchPatches(
+        { sketch: doc.activeSketch, plane: doc.activePlane },
+        { sketch: sketch.id, plane: id },
+      ),
+    );
     // Undoable: which plane new geometry lands on is a document fact, not a view
     // preference — the same reason `setCurrentLayer` goes through history.
-    get().run(command('切换基准面', setActivePlanePatch(doc.activePlane, id)));
+    get().run(command('切换基准面', ...patches));
     get().pushLog(`活动草图面: ${plane.name}`);
+  },
+
+  setActiveSketch(id) {
+    const doc = get().doc;
+    const sketch = findSketch(doc, id);
+    if (!sketch || doc.activeSketch === id) return;
+    get().run(
+      command(
+        '切换草图',
+        ...activateSketchPatches(
+          { sketch: doc.activeSketch, plane: doc.activePlane },
+          { sketch: sketch.id, plane: sketch.plane },
+        ),
+      ),
+    );
+    get().pushLog(`活动草图: ${sketch.name}`);
   },
 
   addFrameOnActivePlane() {
@@ -1307,19 +1622,45 @@ export const useEditor = create<EditorState>((set, get) => ({
     if (id === 'xy' || id === 'yz' || id === 'zx') return;
     const plane = doc.planes.find((p) => p.id === id);
     if (!plane) return;
-    const count = doc.entities.filter((e) => planeOf(e) === id).length;
+    // One plane = one sketch, so deleting the plane deletes its sketch — but
+    // only when nothing lives there. `PHASE1_PLAN.md` risk list, reused from
+    // `danglingSolids`: check the references first and *refuse with a reason*,
+    // rather than cascade-deleting a sketch the user cannot see the cost of.
+    const sketch = sketchOfPlane(doc, id);
+    const count = sketch ? sketch.entities.length : 0;
     if (count > 0) {
       get().pushLog(`「${plane.name}」上还有 ${count} 个图元，先移走或删除再删面。`);
       return;
     }
+    // A sketch a feature consumes directly is one that cannot go away without
+    // breaking it (`sketchRefOf` spells out which kinds those are).
+    const refs = sketch
+      ? featuresOf(doc).filter((f) => sketchRefOf(f) === sketch.id).length
+      : 0;
+    if (refs > 0) {
+      get().pushLog(`「${plane.name}」上还有 ${refs} 个特征引用它，先删掉那些特征再删面。`);
+      return;
+    }
     const patches: Patch[] = [];
-    if (doc.activePlane === id) {
+    const xySketch = sketchOfPlane(doc, XY_PLANE);
+    if ((doc.activePlane === id || (sketch && doc.activeSketch === sketch.id)) && xySketch) {
       // Switching away is folded into the same command, so one undo brings the
       // plane back *and* restores what was active.
-      patches.push(setActivePlanePatch(doc.activePlane, XY_PLANE));
+      patches.push(
+        ...activateSketchPatches(
+          { sketch: doc.activeSketch, plane: doc.activePlane },
+          { sketch: xySketch.id, plane: XY_PLANE },
+        ),
+      );
     }
     const p = removePlane(doc, id);
     if (p) patches.push(p);
+    // The sketch goes with its plane — a sketch node naming a plane that no
+    // longer exists would be a dangling row in the tree.
+    if (sketch) {
+      const sp = removeSketch(doc, sketch.id);
+      if (sp) patches.push(sp);
+    }
     if (patches.length > 0) get().run(command('删除基准面', ...patches));
   },
 
@@ -1328,8 +1669,14 @@ export const useEditor = create<EditorState>((set, get) => ({
   },
   setKernelReady(ready) {
     // 内核刚就绪时补算一次：文档可能在内核到位之前就建好了（示例图纸就是这样），
-    // 否则状态栏会一直空着等到用户下一次动文档。
-    set({ kernelReady: ready, constraintReport: analyzeDocument(get().doc) });
+    // 否则状态栏会一直空着等到用户下一次动文档。特征求值同理——内核没就绪时
+    // 求值器返回空网格（不是错误），这里补算把真正的三角形填上。
+    const doc = get().doc;
+    set({
+      kernelReady: ready,
+      constraintReport: analyzeDocument(doc),
+      featureEval: evaluate(doc),
+    });
   },
 
   markSaved() {
@@ -1359,6 +1706,15 @@ function worldToScreen(p: Vec2, view: ViewState): Vec2 {
   };
 }
 
+/**
+ * Which sketch an entity lives in — the id every entity patch must carry.
+ * Falls back to the active sketch for an id that names nothing, which is the
+ * same "missing id is a no-op" posture the patch layer has always had.
+ */
+function sketchIdOf(doc: CadDocument, id: EntityId): SketchId {
+  return sketchOfEntity(doc, id)?.id ?? doc.activeSketch;
+}
+
 export function docBounds(doc: CadDocument): { minX: number; minY: number; maxX: number; maxY: number } | null {
   let minX = Infinity;
   let minY = Infinity;
@@ -1370,7 +1726,7 @@ export function docBounds(doc: CadDocument): { minX: number; minY: number; maxX:
     if (x > maxX) maxX = x;
     if (y > maxY) maxY = y;
   };
-  for (const e of doc.entities) {
+  for (const e of allEntities(doc)) {
     switch (e.type) {
       case 'line':
         visit(e.a.x, e.a.y);
@@ -1472,12 +1828,20 @@ function solveAfterEdit(
   const overrides = new Map<EntityId, Entity>();
   for (const e of edits) overrides.set(e.id, e);
 
-  const involved = doc.entities
+  const involved = allEntities(doc)
     .filter((e) => involvedIds.has(e.id))
     .map((e) => overrides.get(e.id) ?? e);
 
   if (!involved.some((e) => movingSet.has(e.id))) return [];
-  return solveConstraints({ ...doc, entities: involved }, movingSet);
+  // The solver's scratch space: a shadow document whose single sketch holds
+  // exactly the involved entities. `solveConstraints` reads constraints and
+  // entities — never planes — so the scratch sketch's plane is irrelevant,
+  // and the real tree is left untouched.
+  const scratch = { id: '__solve', name: '', plane: doc.activePlane, entities: involved };
+  return solveConstraints(
+    { ...doc, nodes: [{ kind: 'sketch', sketch: scratch }], activeSketch: scratch.id },
+    movingSet,
+  );
 }
 
 /**
@@ -1526,7 +1890,7 @@ function withConstraintRepair(
       // 直线自己的「长度」尺寸（两端点都在它身上）不是圆心语义：钉住起点会
       // 让拖动变成拉伸。长度约束对平移完全无感，本来就该整条线跟着走。
       if (isSelfDimension(c)) continue;
-      const owner = doc.entities.find((x) => x.id === c.a.entity);
+      const owner = findEntity(doc, c.a.entity);
       if (!owner) continue;
       const at = constraintPointAt(owner, c.a.point, c.a.index ?? 0);
       if (!at) continue;
@@ -1547,9 +1911,11 @@ function withConstraintRepair(
   }
 
   const patches: Patch[] = [];
-  for (const before of doc.entities) {
+  for (const before of allEntities(doc)) {
     const after = finalById.get(before.id);
-    if (after && !geometryEquals(before, after)) patches.push(updateEntity(before, after));
+    if (after && !geometryEquals(before, after)) {
+      patches.push(updateEntity(sketchIdOf(doc, before.id), before, after));
+    }
   }
   return patches;
 }
@@ -1557,7 +1923,7 @@ function withConstraintRepair(
 /** Convenience selector: the currently selected entities. */
 export function selectedEntities(state: EditorState): Entity[] {
   if (state.selection.size === 0) return [];
-  return state.doc.entities.filter((e) => state.selection.has(e.id));
+  return sketchEntities(state.doc).filter((e) => state.selection.has(e.id));
 }
 
 /** Convenience selector: the active layer object. */

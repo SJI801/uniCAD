@@ -43,12 +43,12 @@ export interface EntityBase {
   /** Explicit lineweight in millimetres. `null` inherits the layer's. */
   lineWeight: number | null;
   /**
-   * The datum plane this sketch lives on.
-   *
-   * Optional, and *absent means the XY plane* — so a document written before
-   * planes existed reads back as "everything on XY" with no migration.
+   * Which datum plane this entity is on is **not** stored here: the sketch
+   * that hosts the entity owns the plane (see `Sketch`). Stage 1 removed the
+   * per-entity `plane` field rather than keep two spellings of one fact —
+   * "the sketch says XY while the entity says YZ" was a bug waiting for a
+   * plane switch to expose it.
    */
-  plane?: PlaneId;
   /** Display name, shown in the properties panel. */
   name?: string;
 }
@@ -413,10 +413,6 @@ export function defaultFrames(): DocFrame[] {
 }
 
 /** The plane an entity sits on, defaulting to XY. */
-export function planeOf(e: Entity): PlaneId {
-  return e.plane ?? XY_PLANE;
-}
-
 export function findPlane(doc: CadDocument, id: PlaneId): DocPlane | undefined {
   return doc.planes.find((p) => p.id === id);
 }
@@ -435,44 +431,200 @@ export function planeFrame(p: DocPlane): Float64Array {
   return Float64Array.from([...p.origin, ...p.u, ...p.v]);
 }
 
+// ---------------------------------------------------------------------------
+// Feature tree (stage 1)
+// ---------------------------------------------------------------------------
+
+export type SketchId = string;
+export type FeatureId = string;
+
 /**
- * An extruded solid — a closed 2D sketch pulled along its plane's normal.
+ * A sketch — the entities living on one datum plane, and their **only** host.
  *
- * Deliberately **not** a member of the `Entity` union. `Entity` *is* the 2D
- * sketch: it is what `packScene` / `writeEntity` encode to the flat wire format,
- * what the picker hit-tests, what the properties panel edits, and what DXF
- * round-trips. A solid is none of those — it has no 2D geometry of its own, is
- * not picked in the 2D view, and cannot be written to DXF. Keeping it in a side
- * list leaves every one of those 2D paths exactly as they were, so the 3D work
- * cannot regress the drawing.
- *
- * It is *parametric*: the solid stores the id of the closed sketch it was pulled
- * from plus a height, and the triangle mesh is re-derived by the kernel on
- * demand. Editing the sketch, or the height, changes the solid — nothing is
- * baked.
+ * "One plane = one sketch" is not a new rule: the constraint solver and the 2D
+ * renderer already grouped by `planeOf(e) === doc.activePlane` before stage 1.
+ * What changed in step 3 is that the grouping is now *stored*: a sketch is a
+ * document object with its own id and name, and the plane lives here rather
+ * than on each entity.
  */
-export interface Solid {
-  id: string;
-  /** The closed 2D entity this was extruded from (rect / circle / closed polyline). */
-  source: EntityId;
-  /** Extrusion height along +Z, in model units. */
+export interface Sketch {
+  id: SketchId;
+  name: string;
+  plane: PlaneId;
+  entities: Entity[];
+}
+
+/** Fields every feature carries. `suppressed` skips evaluation, keeps the node. */
+export interface FeatureBase {
+  id: FeatureId;
+  name: string;
+  suppressed?: boolean;
+}
+
+/**
+ * An extrusion — a closed 2D curve pulled along its sketch plane's normal.
+ *
+ * What the old `Solid` side-table entry becomes, and it inherits that type's
+ * two load-bearing properties: it is **not** a member of the `Entity` union
+ * (`Entity` *is* the 2D sketch — what `packScene` encodes, what the picker
+ * hit-tests, what the properties panel edits, what DXF round-trips; a feature
+ * is none of those), and it is *parametric*: `profile` + `height` are the
+ * intent, the triangle mesh is re-derived by the kernel on demand, so editing
+ * the sketch or the height changes the solid with nothing baked.
+ *
+ * `profile` split out of the old `source` because a feature has its own place
+ * in the tree: it can no longer be found by "look in the active sketch".
+ */
+export interface ExtrudeFeature extends FeatureBase {
+  kind: 'extrude';
+  sketch: SketchId;
+  /** Only this one closed curve; `null` = every closed region of the sketch. */
+  profile: EntityId | null;
   height: number;
   layer: LayerId;
 }
+
+/**
+ * A pattern — one feature repeated (work package 3.6).
+ *
+ * The instances are **derived, not copied**: the node stores "this source, this
+ * many, this far apart", and the evaluator re-reads the source's *own*
+ * parameters on every evaluation. Change the source hole's diameter and every
+ * instance changes at once — which is the entire reason to pattern at feature
+ * level rather than duplicating geometry.
+ *
+ * A row along the source's own in-plane axes today (which way those axes point is
+ * the kernel's business — `perpendicular_basis` — not a second convention the
+ * front end invents). A circular pattern is more fields on this same node, not a
+ * new kind.
+ */
+export interface PatternFeature extends FeatureBase {
+  kind: 'pattern';
+  /** The feature being repeated. Only a hole can be patterned today. */
+  source: FeatureId;
+  /** Instances along the source's in-plane `u` axis, the source included. */
+  count: number;
+  /** Centre-to-centre distance along `u`, model units. */
+  spacing: number;
+  /**
+   * Instances along the perpendicular in-plane axis, the source's own row
+   * included — `1` keeps a single row, `2` makes a grid. Both axes together are
+   * `count × countV` holes.
+   */
+  countV: number;
+  /** Centre-to-centre distance along that second axis. */
+  spacingV: number;
+  layer: LayerId;
+}
+
+/**
+ * The feature kinds. Extrude and revolve read a sketch, boolean reads two
+ * features, a hole generates its own cutter from a face, and a pattern reads
+ * another feature's *parameters* and repeats them.
+ */
+export type Feature =
+  | ExtrudeFeature
+  | RevolveFeature
+  | BooleanFeature
+  | HoleFeature
+  | PatternFeature;
+
+/**
+ * A lathe: a profile revolved around an axis by `angle` radians.
+ *
+ * The axis is an **entity id**, not a stored point+direction: the centreline is
+ * drawn in the sketch like the profile is, so moving that line changes the
+ * solid, deleting it turns the feature into an error node, and neither is a
+ * second copy of a fact the sketch already holds. Same reasoning as `profile`
+ * — and the same reason this lives in the tree rather than in a side table.
+ */
+export interface RevolveFeature extends FeatureBase {
+  kind: 'revolve';
+  sketch: SketchId;
+  /** The closed curve to lathe; `null` = every closed region of the sketch. */
+  profile: EntityId | null;
+  /** The line entity in the same sketch to revolve around. */
+  axis: EntityId;
+  /** Sweep angle in radians; negative sweeps the other way. */
+  angle: number;
+  layer: LayerId;
+}
+
+/**
+ * Stage 3 placeholder — a boolean of two features. Same contract as
+ * `RevolveFeature`: in the union, reported as unimplemented, never created.
+ */
+export interface BooleanFeature extends FeatureBase {
+  kind: 'boolean';
+  op: 'union' | 'subtract' | 'intersect';
+  a: FeatureId;
+  b: FeatureId;
+  layer: LayerId;
+}
+
+/**
+ * A drilled hole (work package 3.2) — a boolean whose cutter is **generated**
+ * rather than being a second feature.
+ *
+ * The cutter is a cylinder built from what the user actually clicked: a point
+ * on a face and that face's outward normal. Storing those two things, instead
+ * of expanding the operation into a generated sketch + extrude + boolean, is
+ * what keeps a hole parametric *and* readable: change the diameter and the cut
+ * is rebuilt, with no extra nodes in the tree to keep in step.
+ *
+ * `depth === 0` means **through** — sized by the kernel from the solid's own
+ * extent, because "far enough to exit" is not a number the user should have to
+ * guess.
+ */
+export interface HoleFeature extends FeatureBase {
+  kind: 'hole';
+  /** The solid being drilled — must appear before this node in the tree. */
+  solid: FeatureId;
+  /** Entry point on that solid's surface, in world coordinates. */
+  at: [number, number, number];
+  /** The face's outward normal there; the hole runs the other way. */
+  normal: [number, number, number];
+  /** Hole diameter, model units. */
+  diameter: number;
+  /** Depth into the material; `0` = through. */
+  depth: number;
+  layer: LayerId;
+}
+
+/**
+ * One row of the feature tree. The list is ordered = evaluation order = display
+ * order, and a sketch node always precedes the features that consume it.
+ */
+export type TreeNode =
+  | { kind: 'sketch'; sketch: Sketch }
+  | { kind: 'feature'; feature: Feature };
 
 export interface CadDocument {
   meta: DocumentMeta;
   settings: DrawingSettings;
   layers: Layer[];
   currentLayer: LayerId;
-  entities: Entity[];
-  /** Extruded 3D solids — see `Solid` for why they are not entities. */
-  solids: Solid[];
+  /**
+   * The feature tree: sketches and features in one ordered list. Entities live
+   * **only** inside sketch nodes — there is no flat entity array any more, so
+   * "which entities" is always a question about the tree (`core/doc.ts`), and
+   * adding a feature kind never means touching the 2D pipeline.
+   */
+  nodes: TreeNode[];
+  /**
+   * The sketch being edited. The 2D view, picker, snap, constraint analysis
+   * and DXF all look at exactly this sketch's entities.
+   */
+  activeSketch: SketchId;
   /** Datum planes. The three base planes always come first and cannot be removed. */
   planes: DocPlane[];
   /** Reference coordinate systems — the world frame, plus any user-made ones. */
   frames: DocFrame[];
-  /** The plane new sketches are drawn on. */
+  /**
+   * The plane new geometry is associated with. Kept in step with
+   * `activeSketch`'s plane by every path that changes either — a divergence
+   * would be the status bar naming one plane while the canvas draws another.
+   */
   activePlane: PlaneId;
   /**
    * Parametric relationships between entities.
@@ -480,7 +632,9 @@ export interface CadDocument {
    * Kept as a flat document-level list rather than a field on each entity
    * because a constraint belongs to *two* curves — storing it on either one
    * would make deleting the other leave a dangling half. See
-   * `constraintsForEntity` for the lookup both directions need.
+   * `constraintsForEntity` for the lookup both directions need. A constraint
+   * is only ever *solved* within one sketch (the active one), but it is stored
+   * document-wide so deleting a curve takes its relationships with it.
    */
   constraints: Constraint[];
 }
@@ -546,19 +700,26 @@ export const DEFAULT_SETTINGS: DrawingSettings = {
 
 export function createEmptyDocument(title = 'Drawing1'): CadDocument {
   const now = new Date().toISOString();
+  // One empty sketch on XY — the host new entities need and the one the 2D
+  // view edits. Its id is deterministic on purpose: runtime-created sketches
+  // get generated ids (`newSketchId`), and nothing in the app ever merges two
+  // empty documents, so a fixed first id cannot collide.
+  const sketch: Sketch = { id: 'sketch-1', name: '草图1', plane: XY_PLANE, entities: [] };
   return {
     meta: {
       title,
       author: '',
       createdAt: now,
       modifiedAt: now,
-      version: 1,
+      // Kept in step with `FILE_VERSION` in `io/json.ts` — a fresh document is
+      // born at the current schema version.
+      version: 2,
     },
     settings: { ...DEFAULT_SETTINGS, osnapModes: [...DEFAULT_OSNAP_MODES] },
     layers: [{ ...DEFAULT_LAYER }],
     currentLayer: DEFAULT_LAYER.id,
-    entities: [],
-    solids: [],
+    nodes: [{ kind: 'sketch', sketch }],
+    activeSketch: sketch.id,
     planes: defaultPlanes(),
     frames: defaultFrames(),
     activePlane: XY_PLANE,

@@ -18,11 +18,13 @@ import {
   CircleTool,
   EllipseTool,
   ExtrudeTool,
+  HoleTool,
   LineTool,
   MeasureTool,
   OffsetTool,
   PolylineTool,
   RectTool,
+  RevolveTool,
   SelectTool,
   TrimTool,
   parsePoint,
@@ -32,7 +34,8 @@ import { arcThroughPoints, initKernel, isKernelReady, packScene, pickAll } from 
 import { isPickable } from '../core/entities';
 import { downloadText, pickTextFile, downloadBlob } from '../io/json';
 import { exportDxf, importDxfComplete, looksLikeDxf } from '../io/dxf';
-import { createEmptyDocument, fmt, planeOf, type Entity, type Vec2 } from '../core/types';
+import { createEmptyDocument, fmt, type Entity, type Vec2 } from '../core/types';
+import { allEntities, replaceEntities, sketchEntities } from '../core/doc';
 
 // ---------------------------------------------------------------------------
 // Tool factory
@@ -58,6 +61,8 @@ function createTools(): Map<string, Tool> {
     new TrimTool(),
     new OffsetTool(),
     new ExtrudeTool(),
+    new RevolveTool(),
+    new HoleTool(),
     new MeasureTool(),
   ];
   return new Map(tools.map((t) => [t.id, t]));
@@ -78,9 +83,7 @@ function pickEntityAt(point: Vec2): string | null {
   // position in this 2D view, so hit-testing it would be testing a coordinate
   // that is not on screen — and would let, say, extrude grab a sketch the user
   // cannot even see.
-  const pickable = state.doc.entities.filter(
-    (e) => isPickable(state.doc, e) && planeOf(e) === state.doc.activePlane,
-  );
+  const pickable = sketchEntities(state.doc).filter((e) => isPickable(state.doc, e));
   if (pickable.length === 0) return null;
   const scene = packScene(pickable);
   const tol = state.doc.settings.pickAperturePx * state.view.scale;
@@ -342,7 +345,7 @@ export default function Workbench(): React.ReactElement {
     if (looksLikeDxf(picked.text) && !picked.text.trimStart().startsWith('{')) {
       const result = importDxfComplete(picked.text, picked.name.replace(/\.[^.]+$/, ''));
       replaceDocument(result.doc);
-      pushLog(`已从 DXF 导入 ${result.doc.entities.length} 个图元`);
+      pushLog(`已从 DXF 导入 ${allEntities(result.doc).length} 个图元`);
       for (const w of result.warnings) pushLog(`⚠ ${w}`);
       return;
     }
@@ -360,7 +363,7 @@ export default function Workbench(): React.ReactElement {
     const dxf = exportDxf(state.doc, { writeExtents: true });
     const name = fileNameRef.current.replace(/\.json$/i, '').replace(/\.unicad$/i, '');
     downloadText(`${name || 'drawing'}.dxf`, dxf, 'application/dxf');
-    pushLog(`已导出 DXF R12 (${state.doc.entities.length} 个图元)`);
+    pushLog(`已导出 DXF R12 (${sketchEntities(state.doc).length} 个图元)`);
   }, [pushLog]);
 
   const doImportDxf = useCallback(async (): Promise<void> => {
@@ -368,7 +371,7 @@ export default function Workbench(): React.ReactElement {
     if (!picked) return;
     const result = importDxfComplete(picked.text, picked.name.replace(/\.[^.]+$/, ''));
     replaceDocument(result.doc);
-    pushLog(`已导入 DXF "${picked.name}": ${result.doc.entities.length} 个图元, ${result.doc.layers.length} 个图层`);
+    pushLog(`已导入 DXF "${picked.name}": ${allEntities(result.doc).length} 个图元, ${result.doc.layers.length} 个图层`);
     for (const w of result.warnings) pushLog(`⚠ ${w}`);
     useEditor.getState().zoomToFit();
   }, [pushLog, replaceDocument]);
@@ -423,7 +426,7 @@ export default function Workbench(): React.ReactElement {
   const seededRef = useRef(false);
   useEffect(() => {
     if (seededRef.current) return;
-    if (doc.entities.length > 0) return;
+    if (allEntities(doc).length > 0) return;
     seededRef.current = true;
     const seeded = seedDemo();
     replaceDocument(seeded.doc);
@@ -431,7 +434,7 @@ export default function Workbench(): React.ReactElement {
     pushLog('提示: 滚轮缩放 · 按住 Alt/中键平移 · 输入 L 开始画线');
     // Frame it after the viewport has measured itself.
     window.setTimeout(() => useEditor.getState().zoomToFit(), 120);
-  }, [doc.entities.length, pushLog, replaceDocument]);
+  }, [allEntities(doc).length, pushLog, replaceDocument]);
 
   return (
     <div className="workbench">
@@ -444,7 +447,7 @@ export default function Workbench(): React.ReactElement {
         <div className="header-meta">
           <span className="header-chip">{doc.meta.title}</span>
           <span className="header-chip dim">
-            {doc.entities.length} 图元 / {doc.layers.length} 图层
+            {allEntities(doc).length} 图元 / {doc.layers.length} 图层
           </span>
         </div>
       </header>
@@ -483,21 +486,23 @@ function seedDemo(): { doc: ReturnType<typeof createEmptyDocument> } {
   const layerId = doc.layers[0]!.id;
   const init = { layer: layerId };
 
-  // A simple mechanical-ish bracket so the geometry tools have something to grab.
-  doc.entities.push(
+  // A simple mechanical-ish bracket so the geometry tools have something to
+  // grab. Collected first and installed in one shot through the document's
+  // write API — the same route a DXF import takes, and the only owner of the
+  // entity store once the feature tree lands (work package 1.6).
+  const demo: Entity[] = [
     mkLine(init, { x: 0, y: 0 }, { x: 120, y: 0 }),
     mkLine(init, { x: 120, y: 0 }, { x: 120, y: 80 }),
     mkLine(init, { x: 120, y: 80 }, { x: 0, y: 80 }),
     mkLine(init, { x: 0, y: 80 }, { x: 0, y: 0 }),
-  );
-
-  doc.entities.push(mkCircle(init, { x: 30, y: 40 }, 14));
-  doc.entities.push(mkCircle(init, { x: 90, y: 40 }, 9));
+    mkCircle(init, { x: 30, y: 40 }, 14),
+    mkCircle(init, { x: 90, y: 40 }, 9),
+  ];
 
   // A 3-point arc across the top.
   const arc = solveArcTS({ x: 40, y: 80 }, { x: 60, y: 96 }, { x: 80, y: 80 });
   if (arc) {
-    doc.entities.push({
+    demo.push({
       id: `e-demo-arc`,
       type: 'arc',
       layer: layerId,
@@ -512,7 +517,7 @@ function seedDemo(): { doc: ReturnType<typeof createEmptyDocument> } {
   }
 
   // Baseline dimension-ish polyline.
-  doc.entities.push({
+  demo.push({
     id: 'e-demo-pl',
     type: 'polyline',
     layer: layerId,
@@ -525,6 +530,8 @@ function seedDemo(): { doc: ReturnType<typeof createEmptyDocument> } {
     ],
     closed: false,
   });
+
+  replaceEntities(doc, doc.activeSketch, demo);
 
   return { doc };
 }

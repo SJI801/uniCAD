@@ -14,12 +14,17 @@ import DatumPanel from './DatumPanel';
 import type { CadDocument, Entity, Layer, LineStyle, Vec2 } from '../core/types';
 import { describeEntity } from '../core/entities';
 import { CONSTRAINT_GLYPH } from '../core/constraints';
+import { allEntities } from '../core/doc';
 import {
   describeCommonProps,
   describeEntityProps,
   formatValue,
   type PropField,
 } from '../core/props';
+// The draft/commit field pair lives in `fields.tsx`: the feature tree needs the
+// same contract, and two copies of "one edit = one undo" would drift.
+import { NumberInput, TextInput } from './fields';
+import FeatureTree from './FeatureTree';
 
 const LINESTYLE_LABEL: Record<LineStyle, string> = {
   continuous: '实线',
@@ -45,14 +50,16 @@ export default function LeftPanel(): React.ReactElement {
   const transformSelection = useEditor((s) => s.transformSelection);
   const select = useEditor((s) => s.select);
 
-  const [tab, setTab] = useState<'layers' | 'properties' | 'datum'>('layers');
+  const [tab, setTab] = useState<'layers' | 'properties' | 'datum' | 'tree'>('layers');
 
   // 饼菜单的「属性」扇区（以及将来任何命令）能把这一页掀开：走既有的 unicad:* 事件
   // 通道，免得把「当前标签页」这种局部 UI 状态提升进 store。
   useEffect(() => {
     const onPanel = (e: Event): void => {
       const want = (e as CustomEvent<string>).detail;
-      if (want === 'properties' || want === 'layers' || want === 'datum') setTab(want);
+      if (want === 'properties' || want === 'layers' || want === 'datum' || want === 'tree') {
+        setTab(want);
+      }
     };
     window.addEventListener('unicad:panel', onPanel);
     return () => window.removeEventListener('unicad:panel', onPanel);
@@ -62,9 +69,16 @@ export default function LeftPanel(): React.ReactElement {
 
   const counts = useMemo(() => {
     const m = new Map<string, number>();
-    for (const e of doc.entities) m.set(e.layer, (m.get(e.layer) ?? 0) + 1);
+    // Every entity in the document, not just the active sketch: a layer's
+    // usage count is a document-level fact, and a layer still holding
+    // entities on another plane must not look deletable.
+    for (const e of allEntities(doc)) m.set(e.layer, (m.get(e.layer) ?? 0) + 1);
     return m;
-  }, [doc.entities]);
+    // Keyed on `doc` — a fresh object on every store write. The old flat-list
+    // key never fired after an edit (the patch layer mutates the arrays in
+    // place), so layer counts silently went stale; this is the same fix as
+    // the Ribbon's selection memo.
+  }, [doc]);
 
   return (
     <aside className="side-panel left">
@@ -88,6 +102,13 @@ export default function LeftPanel(): React.ReactElement {
         >
           基准
         </button>
+        <button
+          className={`panel-tab ${tab === 'tree' ? 'active' : ''}`}
+          onClick={() => setTab('tree')}
+          title="特征树：草图与其上的特征，点草图切过去编辑"
+        >
+          特征
+        </button>
       </div>
 
       {tab === 'layers' ? (
@@ -100,7 +121,10 @@ export default function LeftPanel(): React.ReactElement {
           onRemove={removeLayerAction}
           onAdd={() => addLayerAction()}
           onSelectLayerEntities={(id) => {
-            const ids = doc.entities.filter((e) => e.layer === id).map((e) => e.id);
+            // "Select everything on this layer" is a document-level action —
+            // an entity on another plane is still on the layer, and the
+            // selection set is ids, so this stays cross-sketch.
+            const ids = allEntities(doc).filter((e) => e.layer === id).map((e) => e.id);
             select(ids);
           }}
         />
@@ -124,8 +148,10 @@ export default function LeftPanel(): React.ReactElement {
           onApplyAll={(fn, label) => transformSelection(fn, label)}
           onFocus={(id) => select([id])}
         />
-      ) : (
+      ) : tab === 'datum' ? (
         <DatumPanel />
+      ) : (
+        <FeatureTree />
       )}
     </aside>
   );
@@ -604,166 +630,6 @@ function InheritButton({
     >
       随层
     </button>
-  );
-}
-
-/**
- * A number input that commits on blur or Enter and reverts on Escape.
- *
- * Two deliberate choices:
- *
- *   - **`type="text"`, not `type="number"`.** With a number input the browser
- *     reports `''` for a value it considers invalid (a lone `-`, or `1e`), so a
- *     controlled component cannot tell "the user is halfway through typing a
- *     negative number" from "the user cleared the field" — and the parsed value
- *     silently becomes NaN. It also turns the scroll wheel into a value
- *     changer, which in a scrolling panel is a trap.
- *   - **A local draft.** Committing on every keystroke would push one undo step
- *     per character *and* make the field fight the geometry: typing `100` into
- *     a radius would briefly set 1, then 10. The draft also means the displayed
- *     text is exactly what the user typed until they leave the field, so no
- *     reformatting happens mid-edit.
- */
-function NumberInput({
-  value,
-  param,
-  title,
-  step,
-  min,
-  max,
-  unit,
-  placeholder,
-  onCommit,
-}: {
-  value: number;
-  param: string;
-  title?: string;
-  step?: number;
-  min?: number;
-  max?: number;
-  unit?: string;
-  placeholder?: string;
-  onCommit: (n: number) => void;
-}): React.ReactElement {
-  const [draft, setDraft] = useState<string | null>(null);
-
-  const clamp = (n: number): number => {
-    let v = n;
-    if (min !== undefined) v = Math.max(min, v);
-    if (max !== undefined) v = Math.min(max, v);
-    return v;
-  };
-
-  const finite = Number.isFinite(value);
-  const shown = draft ?? (finite ? String(value) : '');
-
-  const commit = (): void => {
-    if (draft === null) return;
-    setDraft(null);
-    const raw = draft.trim();
-    // An empty or unparseable field is a reversal, not a write: leaving the
-    // value alone is the only answer that does not invent a number.
-    if (raw === '') return;
-    const parsed = Number(raw);
-    if (!Number.isFinite(parsed)) return;
-    const next = clamp(round6(parsed));
-    if (finite && next === round6(value)) return;
-    onCommit(next);
-  };
-
-  return (
-    <span className="num-wrap">
-      <input
-        type="text"
-        inputMode="decimal"
-        className="cell-input mono num-input"
-        data-param={param}
-        title={title}
-        value={shown}
-        placeholder={placeholder}
-        onChange={(ev) => setDraft(ev.target.value)}
-        onBlur={commit}
-        onKeyDown={(ev) => {
-          if (ev.key === 'Enter') {
-            ev.preventDefault();
-            commit();
-          } else if (ev.key === 'Escape') {
-            // Swallow it: the global shortcut layer reads Escape as "cancel the
-            // active tool", and cancelling the field is the narrower intent.
-            ev.stopPropagation();
-            setDraft(null);
-          } else if (ev.key === 'ArrowUp' || ev.key === 'ArrowDown') {
-            ev.preventDefault();
-            const cur = Number(shown);
-            if (!Number.isFinite(cur)) return;
-            const delta = (step ?? 1) * (ev.key === 'ArrowUp' ? 1 : -1);
-            setDraft(null);
-            onCommit(clamp(round6(cur + delta)));
-          }
-        }}
-      />
-      {unit && <span className="num-unit">{unit}</span>}
-    </span>
-  );
-}
-
-/** Keep step arithmetic from producing 0.30000000000000004. */
-function round6(n: number): number {
-  if (!Number.isFinite(n)) return n;
-  return Math.round(n * 1e6) / 1e6;
-}
-
-/**
- * A text field with the same draft/commit contract as `NumberInput`.
- *
- * Committing per keystroke would push one undo step per character and clone the
- * whole document each time — so typing a ten-character name would take ten
- * undos to take back. Blur/Enter keeps one edit equal to one undo, which is the
- * only grouping the user can predict.
- */
-function TextInput({
-  value,
-  param,
-  title,
-  placeholder,
-  onCommit,
-}: {
-  value: string;
-  param: string;
-  title?: string;
-  placeholder?: string;
-  onCommit: (v: string) => void;
-}): React.ReactElement {
-  const [draft, setDraft] = useState<string | null>(null);
-  const shown = draft ?? value;
-
-  const commit = (): void => {
-    if (draft === null) return;
-    setDraft(null);
-    if (draft === value) return;
-    onCommit(draft);
-  };
-
-  return (
-    <input
-      type="text"
-      className="cell-input"
-      data-param={param}
-      title={title}
-      value={shown}
-      placeholder={placeholder}
-      onChange={(ev) => setDraft(ev.target.value)}
-      onBlur={commit}
-      onKeyDown={(ev) => {
-        if (ev.key === 'Enter') {
-          ev.preventDefault();
-          commit();
-        } else if (ev.key === 'Escape') {
-          ev.stopPropagation();
-          setDraft(null);
-        }
-      }}
-    />
   );
 }
 

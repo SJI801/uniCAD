@@ -8,14 +8,14 @@
  * entities take part, turning the kernel's reply into real entities, and putting
  * the whole thing in one undoable command.
  *
- * # Scope: the selection, or the whole drawing
+ * # Scope: the selection, or the whole sketch
  *
  * With a selection, only those entities are broken — but they are cut against
- * **every** visible entity, not just against each other, because the useful case
- * is "this line runs through that wall and I want to grab the piece inside the
- * room". With an empty selection the command applies to the entire visible
- * drawing, which is what makes it a one-click clean-up after an import or a DXF
- * round trip.
+ * **every** visible entity of the active sketch, not just against each other,
+ * because the useful case is "this line runs through that wall and I want to
+ * grab the piece inside the room". With an empty selection the command applies
+ * to the entire visible sketch, which is what makes it a one-click clean-up
+ * after an import or a DXF round trip.
  *
  * # Why it is one undo step
  *
@@ -27,6 +27,7 @@
 
 import type { CadDocument, Entity, EntityId } from './types';
 import { command, addEntity, danglingConstraints, removeEntity, type Command, type Patch } from './history';
+import { sketchEntities, sketchOfEntity } from './doc';
 import { kernelOrNull, packScene } from './kernel';
 import { decodePieceRun } from './trim';
 
@@ -58,15 +59,17 @@ function splitTolerance(doc: CadDocument): number {
 
 /**
  * The entities a split may act on: the selection if there is one, otherwise
- * every visible entity.
+ * every visible entity of the active sketch.
  *
  * Hidden and frozen layers are excluded because they are not what the user is
  * looking at, and splitting geometry they cannot see — or cannot then select —
- * is how a drawing ends up in a state the UI gives no way back out of.
+ * is how a drawing ends up in a state the UI gives no way back out of. The
+ * sketch scope matches trim and the solver: the 2D view shows one plane, and
+ * an entity on another plane has no position here to be cut at.
  */
 export function splitTargets(doc: CadDocument, selection: ReadonlySet<EntityId>): Entity[] {
   const targets: Entity[] = [];
-  for (const e of doc.entities) {
+  for (const e of sketchEntities(doc)) {
     const layer = doc.layers.find((l) => l.id === e.layer);
     if (layer && (!layer.visible || layer.frozen)) continue;
     if (selection.size > 0 && !selection.has(e.id)) continue;
@@ -91,10 +94,10 @@ export function splitEntities(
   }
   if (targets.length === 0) return { ok: false, reason: 'noCuts' };
 
-  // Every visible entity, so a selected line is cut by the walls it crosses
-  // even though the walls are not part of this operation.
+  // Every visible entity of the active sketch, so a selected line is cut by
+  // the walls it crosses even though the walls are not part of this operation.
   const scene: Entity[] = [];
-  for (const e of doc.entities) {
+  for (const e of sketchEntities(doc)) {
     const layer = doc.layers.find((l) => l.id === e.layer);
     if (layer && (!layer.visible || layer.frozen)) continue;
     scene.push(e);
@@ -153,7 +156,11 @@ export function splitCommand(doc: CadDocument, groups: readonly SplitGroup[]): C
   // every later solve step work from a broken row. Same rule as trim.
   patches.push(...danglingConstraints(doc, removed));
   for (const g of groups) {
-    for (const piece of g.pieces) patches.push(addEntity(piece));
+    // Pieces go back to the sketch their source lived in — recorded on the
+    // patch, not inferred from whatever sketch happens to be active at undo
+    // time.
+    const sketchId = sketchOfEntity(doc, g.source.id)?.id ?? doc.activeSketch;
+    for (const piece of g.pieces) patches.push(addEntity(sketchId, piece));
   }
 
   const total = groups.reduce((n, g) => n + g.pieces.length, 0);

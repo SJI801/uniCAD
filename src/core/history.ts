@@ -15,6 +15,14 @@
  *
  * Applying the same patch list forwards performs the command; reversing it
  * performs the undo. This makes undo/redo symmetric and testable.
+ *
+ * Entity patches (`add` / `remove` / `update`) carry an explicit **sketch id**
+ * and write through `sketchSlots` from `core/doc.ts`. The id is mandatory, not
+ * inferred from the active sketch: "switch sketches, then undo" must put the
+ * entity back where it came from, not where the user is standing now
+ * (`PHASE1_PLAN.md` risk 5). Tree nodes get their own ops — `sketchAdd` /
+ * `sketchRemove` / `featureAdd` / `featureRemove` — with the insert index
+ * recorded, because node order *is* evaluation order.
  */
 
 import type {
@@ -24,20 +32,24 @@ import type {
   DocPlane,
   Entity,
   EntityId,
+  Feature,
+  FeatureId,
   Layer,
   LayerId,
   PlaneId,
-  Solid,
+  Sketch,
+  SketchId,
 } from './types';
+import { sketchOfEntity, sketchSlots } from './doc';
 
 // ---------------------------------------------------------------------------
 // Patches
 // ---------------------------------------------------------------------------
 
 export type Patch =
-  | { op: 'add'; entity: Entity }
-  | { op: 'remove'; entity: Entity; index: number }
-  | { op: 'update'; before: Entity; after: Entity }
+  | { op: 'add'; sketch: SketchId; entity: Entity }
+  | { op: 'remove'; sketch: SketchId; entity: Entity; index: number }
+  | { op: 'update'; sketch: SketchId; before: Entity; after: Entity }
   | { op: 'layerUpdate'; before: Layer; after: Layer }
   | { op: 'layerAdd'; layer: Layer }
   | { op: 'layerRemove'; layer: Layer; index: number }
@@ -46,8 +58,16 @@ export type Patch =
   | { op: 'constraintRemove'; constraint: Constraint; index: number }
   /** 尺寸改值：同一约束换目标值；撤销换回 before。 */
   | { op: 'constraintUpdate'; before: Constraint; after: Constraint }
-  | { op: 'solidAdd'; solid: Solid }
-  | { op: 'solidRemove'; solid: Solid; index: number }
+  /** Tree nodes. `index` is where the node sits — order is evaluation order. */
+  | { op: 'sketchAdd'; sketch: Sketch; index: number }
+  | { op: 'sketchRemove'; sketch: Sketch; index: number }
+  /** Rename. The node keeps its place; only the payload changes. */
+  | { op: 'sketchUpdate'; before: Sketch; after: Sketch }
+  | { op: 'featureAdd'; feature: Feature; index: number }
+  | { op: 'featureRemove'; feature: Feature; index: number }
+  /** Rename / height / suppress — everything the tree panel edits in place. */
+  | { op: 'featureUpdate'; before: Feature; after: Feature }
+  | { op: 'setActiveSketch'; before: SketchId; after: SketchId }
   | { op: 'planeAdd'; plane: DocPlane }
   | { op: 'planeRemove'; plane: DocPlane; index: number }
   | { op: 'planeUpdate'; before: DocPlane; after: DocPlane }
@@ -71,17 +91,26 @@ export interface Command {
 
 function applyPatch(doc: CadDocument, p: Patch): void {
   switch (p.op) {
-    case 'add':
-      doc.entities.push(structuredClone(p.entity));
+    case 'add': {
+      // The patch names its sketch — never "wherever the user is now".
+      const slots = sketchSlots(doc, p.sketch);
+      if (slots) slots.push(structuredClone(p.entity));
       break;
+    }
     case 'remove': {
-      const i = doc.entities.findIndex((e) => e.id === p.entity.id);
-      if (i >= 0) doc.entities.splice(i, 1);
+      const slots = sketchSlots(doc, p.sketch);
+      if (slots) {
+        const i = slots.findIndex((e) => e.id === p.entity.id);
+        if (i >= 0) slots.splice(i, 1);
+      }
       break;
     }
     case 'update': {
-      const i = doc.entities.findIndex((e) => e.id === p.after.id);
-      if (i >= 0) doc.entities[i] = structuredClone(p.after);
+      const slots = sketchSlots(doc, p.sketch);
+      if (slots) {
+        const i = slots.findIndex((e) => e.id === p.after.id);
+        if (i >= 0) slots[i] = structuredClone(p.after);
+      }
       break;
     }
     case 'layerAdd':
@@ -113,14 +142,41 @@ function applyPatch(doc: CadDocument, p: Patch): void {
       if (i >= 0) doc.constraints[i] = structuredClone(p.after);
       break;
     }
-    case 'solidAdd':
-      doc.solids.push(structuredClone(p.solid));
+    case 'sketchAdd':
+      doc.nodes.splice(Math.min(p.index, doc.nodes.length), 0, {
+        kind: 'sketch',
+        sketch: structuredClone(p.sketch),
+      });
       break;
-    case 'solidRemove': {
-      const i = doc.solids.findIndex((s) => s.id === p.solid.id);
-      if (i >= 0) doc.solids.splice(i, 1);
+    case 'sketchRemove': {
+      const i = doc.nodes.findIndex((n) => n.kind === 'sketch' && n.sketch.id === p.sketch.id);
+      if (i >= 0) doc.nodes.splice(i, 1);
       break;
     }
+    case 'sketchUpdate': {
+      const i = doc.nodes.findIndex((n) => n.kind === 'sketch' && n.sketch.id === p.after.id);
+      if (i >= 0) doc.nodes[i] = { kind: 'sketch', sketch: structuredClone(p.after) };
+      break;
+    }
+    case 'featureAdd':
+      doc.nodes.splice(Math.min(p.index, doc.nodes.length), 0, {
+        kind: 'feature',
+        feature: structuredClone(p.feature),
+      });
+      break;
+    case 'featureRemove': {
+      const i = doc.nodes.findIndex((n) => n.kind === 'feature' && n.feature.id === p.feature.id);
+      if (i >= 0) doc.nodes.splice(i, 1);
+      break;
+    }
+    case 'featureUpdate': {
+      const i = doc.nodes.findIndex((n) => n.kind === 'feature' && n.feature.id === p.after.id);
+      if (i >= 0) doc.nodes[i] = { kind: 'feature', feature: structuredClone(p.after) };
+      break;
+    }
+    case 'setActiveSketch':
+      doc.activeSketch = p.after;
+      break;
     case 'planeAdd':
       doc.planes.push(structuredClone(p.plane));
       break;
@@ -156,17 +212,25 @@ function applyPatch(doc: CadDocument, p: Patch): void {
 function revertPatch(doc: CadDocument, p: Patch): void {
   switch (p.op) {
     case 'add': {
-      const i = doc.entities.findIndex((e) => e.id === p.entity.id);
-      if (i >= 0) doc.entities.splice(i, 1);
+      const slots = sketchSlots(doc, p.sketch);
+      if (slots) {
+        const i = slots.findIndex((e) => e.id === p.entity.id);
+        if (i >= 0) slots.splice(i, 1);
+      }
       break;
     }
-    case 'remove':
+    case 'remove': {
       // Re-insert at the original index so z-order is preserved.
-      doc.entities.splice(Math.min(p.index, doc.entities.length), 0, structuredClone(p.entity));
+      const slots = sketchSlots(doc, p.sketch);
+      if (slots) slots.splice(Math.min(p.index, slots.length), 0, structuredClone(p.entity));
       break;
+    }
     case 'update': {
-      const i = doc.entities.findIndex((e) => e.id === p.before.id);
-      if (i >= 0) doc.entities[i] = structuredClone(p.before);
+      const slots = sketchSlots(doc, p.sketch);
+      if (slots) {
+        const i = slots.findIndex((e) => e.id === p.before.id);
+        if (i >= 0) slots[i] = structuredClone(p.before);
+      }
       break;
     }
     case 'layerAdd': {
@@ -201,13 +265,40 @@ function revertPatch(doc: CadDocument, p: Patch): void {
       if (i >= 0) doc.constraints[i] = structuredClone(p.before);
       break;
     }
-    case 'solidAdd': {
-      const i = doc.solids.findIndex((s) => s.id === p.solid.id);
-      if (i >= 0) doc.solids.splice(i, 1);
+    case 'sketchAdd': {
+      const i = doc.nodes.findIndex((n) => n.kind === 'sketch' && n.sketch.id === p.sketch.id);
+      if (i >= 0) doc.nodes.splice(i, 1);
       break;
     }
-    case 'solidRemove':
-      doc.solids.splice(Math.min(p.index, doc.solids.length), 0, structuredClone(p.solid));
+    case 'sketchRemove':
+      doc.nodes.splice(Math.min(p.index, doc.nodes.length), 0, {
+        kind: 'sketch',
+        sketch: structuredClone(p.sketch),
+      });
+      break;
+    case 'sketchUpdate': {
+      const i = doc.nodes.findIndex((n) => n.kind === 'sketch' && n.sketch.id === p.before.id);
+      if (i >= 0) doc.nodes[i] = { kind: 'sketch', sketch: structuredClone(p.before) };
+      break;
+    }
+    case 'featureAdd': {
+      const i = doc.nodes.findIndex((n) => n.kind === 'feature' && n.feature.id === p.feature.id);
+      if (i >= 0) doc.nodes.splice(i, 1);
+      break;
+    }
+    case 'featureRemove':
+      doc.nodes.splice(Math.min(p.index, doc.nodes.length), 0, {
+        kind: 'feature',
+        feature: structuredClone(p.feature),
+      });
+      break;
+    case 'featureUpdate': {
+      const i = doc.nodes.findIndex((n) => n.kind === 'feature' && n.feature.id === p.before.id);
+      if (i >= 0) doc.nodes[i] = { kind: 'feature', feature: structuredClone(p.before) };
+      break;
+    }
+    case 'setActiveSketch':
+      doc.activeSketch = p.before;
       break;
     case 'planeAdd': {
       const i = doc.planes.findIndex((x) => x.id === p.plane.id);
@@ -326,18 +417,20 @@ export class CommandHistory {
 // Patch builders — the ergonomic layer tools actually use
 // ---------------------------------------------------------------------------
 
-export function addEntity(e: Entity): Patch {
-  return { op: 'add', entity: structuredClone(e) };
+export function addEntity(sketch: SketchId, e: Entity): Patch {
+  return { op: 'add', sketch, entity: structuredClone(e) };
 }
 
 export function removeEntity(doc: CadDocument, id: EntityId): Patch | null {
-  const index = doc.entities.findIndex((e) => e.id === id);
+  const sketch = sketchOfEntity(doc, id);
+  if (!sketch) return null;
+  const index = sketch.entities.findIndex((e) => e.id === id);
   if (index < 0) return null;
-  return { op: 'remove', entity: structuredClone(doc.entities[index]!), index };
+  return { op: 'remove', sketch: sketch.id, entity: structuredClone(sketch.entities[index]!), index };
 }
 
-export function updateEntity(before: Entity, after: Entity): Patch {
-  return { op: 'update', before: structuredClone(before), after: structuredClone(after) };
+export function updateEntity(sketch: SketchId, before: Entity, after: Entity): Patch {
+  return { op: 'update', sketch, before: structuredClone(before), after: structuredClone(after) };
 }
 
 export function addLayer(layer: Layer): Patch {
@@ -377,34 +470,88 @@ export function removeConstraint(doc: CadDocument, id: string): Patch | null {
   return { op: 'constraintRemove', constraint: structuredClone(doc.constraints[index]!), index };
 }
 
-export function addSolid(s: Solid): Patch {
-  return { op: 'solidAdd', solid: structuredClone(s) };
+// ---------------------------------------------------------------------------
+// Tree-node patches
+// ---------------------------------------------------------------------------
+
+export function addSketch(sketch: Sketch, index: number): Patch {
+  return { op: 'sketchAdd', sketch: structuredClone(sketch), index };
 }
 
-export function removeSolid(doc: CadDocument, id: string): Patch | null {
-  const index = doc.solids.findIndex((s) => s.id === id);
-  if (index < 0) return null;
-  return { op: 'solidRemove', solid: structuredClone(doc.solids[index]!), index };
+export function removeSketch(doc: CadDocument, id: SketchId): Patch | null {
+  const i = doc.nodes.findIndex((n) => n.kind === 'sketch' && n.sketch.id === id);
+  if (i < 0) return null;
+  const node = doc.nodes[i]!;
+  if (node.kind !== 'sketch') return null;
+  return { op: 'sketchRemove', sketch: structuredClone(node.sketch), index: i };
+}
+
+export function addFeature(feature: Feature, index: number): Patch {
+  return { op: 'featureAdd', feature: structuredClone(feature), index };
+}
+
+export function removeFeature(doc: CadDocument, id: FeatureId): Patch | null {
+  const i = doc.nodes.findIndex((n) => n.kind === 'feature' && n.feature.id === id);
+  if (i < 0) return null;
+  const node = doc.nodes[i]!;
+  if (node.kind !== 'feature') return null;
+  return { op: 'featureRemove', feature: structuredClone(node.feature), index: i };
+}
+
+/** Rename a sketch. The node keeps its index — order is evaluation order. */
+export function updateSketch(before: Sketch, after: Sketch): Patch {
+  return { op: 'sketchUpdate', before: structuredClone(before), after: structuredClone(after) };
 }
 
 /**
- * Removal patches for every solid whose *source sketch* is being deleted.
- *
- * A solid is derived from its sketch, so once the sketch is gone the solid has
- * no profile to extrude and would render as nothing while still occupying a row
- * in any list. Deleting it alongside is the same rule constraints follow. Sorted
- * by descending index so the reverse re-insert stays valid.
+ * Edit a feature in place — rename, height, suppress. One op for all three
+ * because the patch layer's job is "the node now says this"; which field moved
+ * is the caller's business, and before/after makes undo exact either way.
  */
-export function danglingSolids(doc: CadDocument, ids: Iterable<EntityId>): Patch[] {
+export function updateFeature(before: Feature, after: Feature): Patch {
+  return { op: 'featureUpdate', before: structuredClone(before), after: structuredClone(after) };
+}
+
+export function setActiveSketchPatch(before: SketchId, after: SketchId): Patch {
+  return { op: 'setActiveSketch', before, after };
+}
+
+/**
+ * Switching the editing sketch moves the active plane with it — one command,
+ * one undo. Both sides are passed in explicitly (rather than looked up) so
+ * this also works for a sketch that exists only inside the same command, like
+ * the empty one a fresh plane gets on activation.
+ */
+export function activateSketchPatches(
+  before: { sketch: SketchId; plane: PlaneId },
+  after: { sketch: SketchId; plane: PlaneId },
+): Patch[] {
+  const out: Patch[] = [setActiveSketchPatch(before.sketch, after.sketch)];
+  if (before.plane !== after.plane) out.push(setActivePlanePatch(before.plane, after.plane));
+  return out;
+}
+
+/**
+ * Removal patches for every feature whose *profile* is being deleted.
+ *
+ * A feature is derived from its profile curve, so once the curve is gone the
+ * feature has nothing to extrude and would sit in the tree as a permanent
+ * error node. Deleting it alongside is the rule constraints follow. Sorted by
+ * descending node index so the reverse re-insert stays valid.
+ */
+export function danglingFeatures(doc: CadDocument, ids: Iterable<EntityId>): Patch[] {
   const gone = new Set(ids);
-  const doomed: Array<{ s: Solid; i: number }> = [];
-  doc.solids.forEach((s, i) => {
-    if (gone.has(s.source)) doomed.push({ s, i });
+  const doomed: Array<{ f: Feature; i: number }> = [];
+  doc.nodes.forEach((n, i) => {
+    if (n.kind !== 'feature') return;
+    if (n.feature.kind === 'extrude' && n.feature.profile && gone.has(n.feature.profile)) {
+      doomed.push({ f: n.feature, i });
+    }
   });
   doomed.sort((a, b) => b.i - a.i);
-  return doomed.map(({ s, i }) => ({
-    op: 'solidRemove' as const,
-    solid: structuredClone(s),
+  return doomed.map(({ f, i }) => ({
+    op: 'featureRemove' as const,
+    feature: structuredClone(f),
     index: i,
   }));
 }
@@ -474,10 +621,12 @@ export function command(label: string, ...patches: Patch[]): Command {
 
 /**
  * Build a command that adds many entities at once — the common case for
- * paste, array and DXF import.
+ * paste, array and DXF import. The sketch is explicit: a batch that lands in
+ * "whatever is active" would put pasted geometry on the wrong plane if the
+ * user switched sketches between copy and paste.
  */
-export function addManyCommand(label: string, entities: readonly Entity[]): Command {
-  return command(label, ...entities.map(addEntity));
+export function addManyCommand(sketch: SketchId, label: string, entities: readonly Entity[]): Command {
+  return command(label, ...entities.map((e) => addEntity(sketch, e)));
 }
 
 /**
@@ -493,7 +642,9 @@ export function removeManyCommand(
     const p = removeEntity(doc, id);
     if (p) patches.push(p);
   }
-  // Remove from the end backwards so indices stay valid while splicing.
+  // Remove from the end backwards so indices stay valid while splicing. The
+  // indices are per-sketch now; a global descending sort still leaves every
+  // sketch's own removals in reverse order, which is all the invariant needs.
   patches.sort((a, b) => {
     const ai = a.op === 'remove' ? a.index : 0;
     const bi = b.op === 'remove' ? b.index : 0;
@@ -503,7 +654,8 @@ export function removeManyCommand(
   // `danglingConstraints`. Folded into the same command so one undo brings both
   // the geometry and its relationships back.
   patches.push(...danglingConstraints(doc, ids));
-  // …and a sketch's solids go with it too (a solid has no profile without one).
-  patches.push(...danglingSolids(doc, ids));
+  // …and the features whose profile is gone go with it (a feature has no
+  // profile without one).
+  patches.push(...danglingFeatures(doc, ids));
   return command(label, ...patches);
 }

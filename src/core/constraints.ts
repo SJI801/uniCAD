@@ -38,8 +38,8 @@ import {
   UNARY_CONSTRAINTS,
   fmt,
   fmtAngle,
-  planeOf,
 } from './types';
+import { allEntities, findEntity, sketchEntities } from './doc';
 import { constraintPointAt, describeEntity } from './entities';
 import { kernelOrNull, packOne, packScene } from './kernel';
 
@@ -207,7 +207,7 @@ export const POINT_LABEL: Record<ConstraintPointKind, string> = {
 
 /** Short, stable description of one side of a constraint. */
 function targetLabel(doc: CadDocument, t: ConstraintTarget): string {
-  const e = doc.entities.find((x) => x.id === t.entity);
+  const e = findEntity(doc, t.entity);
   const kind = e ? describeEntity(e) : '已删除对象';
   if (t.point === 'none') return kind;
   const pt = POINT_LABEL[t.point];
@@ -745,7 +745,10 @@ export function analyzeDocument(doc: CadDocument): ConstraintReport | null {
   // A wasm build from before the report existed has no such export.
   if (typeof kernel.analyze_constraints !== 'function') return null;
 
-  const scene = doc.entities.filter((e) => planeOf(e) === doc.activePlane);
+  // The active sketch, and only it: a constraint is a relationship inside one
+  // sketch, so the status bar reports the sketch you are drawing on, not a sum
+  // over all planes. `sketchEntities` is that filter, spelled once.
+  const scene = sketchEntities(doc);
   if (scene.length === 0) return null;
 
   const { flat, sent } = constraintInputs(doc, scene);
@@ -876,7 +879,10 @@ export function solveConstraints(doc: CadDocument, movingIds: Iterable<EntityId>
     if (c.b) involvedIds.add(c.b.entity);
   }
 
-  const involved = doc.entities.filter((e) => involvedIds.has(e.id));
+  // Cross-sketch by id on purpose: constraints are stored document-wide, and a
+  // solve that silently dropped the ones naming entities on other planes would
+  // be a constraint that "exists but does nothing".
+  const involved = allEntities(doc).filter((e) => involvedIds.has(e.id));
   // Nothing to do unless something that participates is allowed to move.
   if (!involved.some((e) => moving.has(e.id))) return [];
 

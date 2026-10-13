@@ -35,6 +35,7 @@ const { useEditor, commandRewritesGeometry, refusesGeometryEdit } = await import
   './src/state/editorStore'
 );
 const { command, addEntity, removeEntity } = await import('./src/core/history');
+const { findEntity, sketchEntities } = await import('./src/core/doc');
 const { constraintBadges } = await import('./src/render/constraintMarks');
 const { serializeDocument, deserializeDocument } = await import('./src/io/json');
 
@@ -69,7 +70,7 @@ function install(entities: unknown[]): void {
 }
 
 function entity(id: string): Record<string, unknown> {
-  return S().doc.entities.find((e) => e.id === id) as unknown as Record<string, unknown>;
+  return findEntity(S().doc, id) as unknown as Record<string, unknown>;
 }
 
 function dof(): number {
@@ -372,7 +373,7 @@ describe('0.4-② 完全定义锁住几何，但尺寸照常驱动', () => {
       viewWidth: 1200,
       viewHeight: 800,
     };
-    const badges = constraintBadges(S().doc, new Set(['L']), S().doc.entities, ctx);
+    const badges = constraintBadges(S().doc, new Set(['L']), sketchEntities(S().doc), ctx);
     expect(badges.map((b) => b.text)).toEqual(['锁定', '锁定']);
     expect(badges[0]!.title).toContain('已固定');
     expect(badges[0]!.title).toContain('x =');

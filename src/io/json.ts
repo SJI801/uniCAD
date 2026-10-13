@@ -22,11 +22,16 @@ import type {
   EllipseEntity,
   Entity,
   EntityType,
+  Feature,
   Layer,
+  LayerId,
   LineEntity,
   LineStyle,
+  PlaneId,
   PolylineEntity,
-  Solid,
+  Sketch,
+  SketchId,
+  TreeNode,
   Vec2,
 } from '../core/types';
 import {
@@ -47,9 +52,16 @@ import {
   SIGNED_DIMENSIONS,
   ZERO_VALUE_DIMENSIONS,
 } from '../core/constraints';
+import { ensureV2, treeFromLegacy, type LegacyEntity, type LegacySolid } from '../core/doc';
+import { newSketchId } from '../core/entities';
 
 export const FILE_MAGIC = 'unicad';
-export const FILE_VERSION = 1;
+/**
+ * v2 = the feature tree: `nodes` (sketches hold the entities, features follow
+ * the sketches that feed them) replaces the flat `entities` array + `solids`
+ * side table. v1 files migrate on read — see `deserializeDocument`.
+ */
+export const FILE_VERSION = 2;
 
 export interface CadFile {
   magic: typeof FILE_MAGIC;
@@ -58,16 +70,18 @@ export interface CadFile {
   settings: DrawingSettings;
   layers: Layer[];
   currentLayer: string;
-  entities: unknown[];
-  /**
-   * Parametric constraints. Optional on read: files written before the feature
-   * existed simply have no array, and fall back to "no constraints".
-   */
+  /** The feature tree, in evaluation order. See `encodeNode`. */
+  nodes: unknown[];
+  /** The sketch being edited. */
+  activeSketch: SketchId;
   constraints?: unknown[];
   /**
-   * Extruded 3D solids. Optional on read for the same reason as constraints —
-   * a file saved before 3D existed simply has none.
+   * v1 only: the flat entity array. Present in files written before stage 1;
+   * `deserializeDocument` reads it to build the v2 tree. v2 files never
+   * contain it.
    */
+  entities?: unknown[];
+  /** v1 only: extruded solids, migrated into extrude features. */
   solids?: unknown[];
   /**
    * Datum planes and reference coordinate systems. Optional on read. The three
@@ -91,9 +105,8 @@ function encodeEntity(e: Entity): Record<string, unknown> {
   if (e.color !== null) attrs['color'] = e.color;
   if (e.lineStyle !== null) attrs['lineStyle'] = e.lineStyle;
   if (e.lineWeight !== null) attrs['lineWeight'] = e.lineWeight;
-  // Written only when the sketch is off the XY plane, so a 2D drawing file keeps
-  // looking exactly as it always did.
-  if (e.plane !== undefined) attrs['plane'] = e.plane;
+  // No `plane` here any more: the sketch that hosts the entity owns the plane
+  // (v1 files still carry the field — the migration reads it for grouping).
   if (e.name) attrs['name'] = e.name;
 
   switch (e.type) {
@@ -119,20 +132,99 @@ function flatten(points: readonly Vec2[]): number[] {
   return out;
 }
 
-export function serializeDocument(doc: CadDocument): CadFile {
+/**
+ * One tree node, with an explicit `kind` so the reader never has to guess from
+ * the shape. A sketch node carries its entities inline; a feature node carries
+ * its parameters. Only extrude exists in v2 — when stage 2 / 3 add kinds, this
+ * grows a branch per kind, and the reader already skips what it does not know.
+ */
+function encodeNode(n: TreeNode): Record<string, unknown> {
+  if (n.kind === 'sketch') {
+    return {
+      kind: 'sketch',
+      sketch: {
+        id: n.sketch.id,
+        name: n.sketch.name,
+        plane: n.sketch.plane,
+        entities: n.sketch.entities.map(encodeEntity),
+      },
+    };
+  }
+  const f = n.feature;
+  const base = {
+    id: f.id,
+    name: f.name,
+    // Omitted when false — the common case reads as what it means.
+    ...(f.suppressed ? { suppressed: true } : {}),
+  };
+  switch (f.kind) {
+    case 'extrude':
+      return {
+        kind: 'feature',
+        feature: { kind: 'extrude', ...base, sketch: f.sketch, profile: f.profile, height: f.height, layer: f.layer },
+      };
+    case 'revolve':
+      return {
+        kind: 'feature',
+        feature: { kind: 'revolve', ...base, sketch: f.sketch, profile: f.profile, axis: f.axis, angle: f.angle, layer: f.layer },
+      };
+    case 'boolean':
+      return {
+        kind: 'feature',
+        feature: { kind: 'boolean', ...base, op: f.op, a: f.a, b: f.b, layer: f.layer },
+      };
+    case 'hole':
+      return {
+        kind: 'feature',
+        feature: {
+          kind: 'hole',
+          ...base,
+          solid: f.solid,
+          at: f.at,
+          normal: f.normal,
+          diameter: f.diameter,
+          depth: f.depth,
+          layer: f.layer,
+        },
+      };
+    case 'pattern':
+      return {
+        kind: 'feature',
+        feature: {
+          kind: 'pattern',
+          ...base,
+          source: f.source,
+          count: f.count,
+          spacing: f.spacing,
+          countV: f.countV,
+          spacingV: f.spacingV,
+          layer: f.layer,
+        },
+      };
+  }
+}
+
+export function serializeDocument(input: CadDocument): CadFile {
+  // Normalise first: a document that still carries a flat `entities` array
+  // (a hand-built object, an older decode path) is rebuilt into the tree
+  // here, so what lands on disk is always valid v2 — "read in migrated, write
+  // current" (`PHASE1_PLAN.md` 1.6). Idempotent for documents that are
+  // already tree-shaped.
+  const doc = ensureV2(input);
   return {
     magic: FILE_MAGIC,
     version: FILE_VERSION,
     meta: {
       ...doc.meta,
       modifiedAt: new Date().toISOString(),
+      version: FILE_VERSION,
     },
     settings: { ...doc.settings, osnapModes: [...doc.settings.osnapModes] },
     layers: doc.layers.map((l) => ({ ...l })),
     currentLayer: doc.currentLayer,
-    entities: doc.entities.map(encodeEntity),
+    nodes: doc.nodes.map(encodeNode),
+    activeSketch: doc.activeSketch,
     constraints: doc.constraints.map(encodeConstraint),
-    solids: doc.solids.map((s) => ({ ...s })),
     planes: doc.planes.map((p) => ({ ...p })),
     frames: doc.frames.map((f) => ({ ...f })),
     activePlane: doc.activePlane,
@@ -252,7 +344,8 @@ function decodeConstraint(raw: unknown, existing: ReadonlySet<string>): Constrai
     : { id: nextConstraintId(), kind: kind as ConstraintKind, a, b, value };
 }
 
-function decodeEntity(raw: unknown, fallbackLayer: string): Entity | null {  if (typeof raw !== 'object' || raw === null) return null;
+function decodeEntityOnly(raw: unknown, fallbackLayer: string): Entity | null {
+  if (typeof raw !== 'object' || raw === null) return null;
   const o = raw as Record<string, unknown>;
   const t = str(o['t']);
   const id = str(o['h']) || `e-${Math.random().toString(36).slice(2)}`;
@@ -262,8 +355,8 @@ function decodeEntity(raw: unknown, fallbackLayer: string): Entity | null {  if 
   const lineStyleValue = ls === null || ls === undefined ? null : lineStyle(ls, 'continuous');
   const lw = typeof o['lineWeight'] === 'number' ? o['lineWeight'] : null;
   const name = typeof o['name'] === 'string' ? o['name'] : undefined;
-  // Absent ⇒ the XY plane (see `EntityBase.plane`); only carry it when present.
-  const plane = typeof o['plane'] === 'string' ? o['plane'] : undefined;
+  // No `plane` on the entity any more — the hosting sketch owns it. The v1
+  // stamp is read by `decodeEntity` below, for the migration's grouping.
 
   const p = Array.isArray(o['p']) ? (o['p'] as unknown[]) : [];
 
@@ -273,7 +366,6 @@ function decodeEntity(raw: unknown, fallbackLayer: string): Entity | null {  if 
     color,
     lineStyle: lineStyleValue,
     lineWeight: lw,
-    ...(plane !== undefined ? { plane } : {}),
     ...(name !== undefined ? { name } : {}),
   };
 
@@ -395,7 +487,9 @@ export function deserializeDocument(input: string | unknown): LoadResult {
   if (o['magic'] !== FILE_MAGIC) {
     warnings.push('文件缺少 uniCAD 标识，尝试按兼容模式读取。');
   }
-  const version = num(o['version'], FILE_VERSION);
+  // A missing version means v1 — the field arrived with constraints, and
+  // anything older than the tree is flat entities + a solids side table.
+  const version = num(o['version'], 1);
   if (version > FILE_VERSION) {
     warnings.push(`文件由更新版本 (v${version}) 创建，部分功能可能不可用。`);
   }
@@ -407,37 +501,65 @@ export function deserializeDocument(input: string | unknown): LoadResult {
   const layerIds = new Set(layers.map((l) => l.id));
   const fallbackLayer = layers[0]!.id;
 
-  const entitiesRaw = Array.isArray(o['entities']) ? (o['entities'] as unknown[]) : [];
-  const entities: Entity[] = [];
-  let droppedCount = 0;
-  for (const raw of entitiesRaw) {
-    const e = decodeEntity(raw, fallbackLayer);
-    if (!e) {
-      droppedCount += 1;
-      continue;
-    }
-    if (!layerIds.has(e.layer)) {
-      // Preserve the reference but make it resolvable.
-      e.layer = fallbackLayer;
-      warnings.push(`图元引用了不存在的图层，已重置到 "${layers[0]!.name}"。`);
-    }
-    entities.push(e);
-  }
-  if (droppedCount > 0) {
-    warnings.push(`跳过 ${droppedCount} 个无法识别的图元。`);
-  }
+  // Planes are read before the tree because a sketch names its plane.
+  const planes = decodePlanes(o['planes']);
+  const frames = decodeFrames(o['frames']);
 
-  const metaRaw = (o['meta'] ?? {}) as Record<string, unknown>;
-  const now = new Date().toISOString();
+  // ---- the tree -------------------------------------------------------------
+  //
+  // v2 stores `nodes` directly. v1 stores a flat `entities` array plus a
+  // `solids` side table, migrated into the tree through the shared grouping in
+  // `core/doc.ts` — one implementation, so this path and the store-side
+  // normalisation (`ensureV2`) can never disagree about which sketch an entity
+  // belongs to. Migration is idempotent by construction: a v2 file takes the
+  // nodes branch and never re-groups.
+  let nodes: TreeNode[];
+  if (version >= 2 && Array.isArray(o['nodes'])) {
+    nodes = decodeNodes(o['nodes'] as unknown[], fallbackLayer, layerIds, warnings);
+  } else {
+    if (version >= 2) warnings.push('文件缺少 nodes，按 v1 结构迁移读取。');
+    else warnings.push('检测到 v1 文件：已迁移为草图 + 特征树（v2）。');
+    const legacy: LegacyEntity[] = [];
+    let droppedCount = 0;
+    const entitiesRaw = Array.isArray(o['entities']) ? (o['entities'] as unknown[]) : [];
+    for (const raw of entitiesRaw) {
+      const decoded = decodeEntity(raw, fallbackLayer);
+      if (!decoded) {
+        droppedCount += 1;
+        continue;
+      }
+      if (!layerIds.has(decoded.entity.layer)) {
+        // Preserve the reference but make it resolvable.
+        decoded.entity.layer = fallbackLayer;
+        warnings.push(`图元引用了不存在的图层，已重置到 "${layers[0]!.name}"。`);
+      }
+      legacy.push(decoded);
+    }
+    if (droppedCount > 0) {
+      warnings.push(`跳过 ${droppedCount} 个无法识别的图元。`);
+    }
+    nodes = treeFromLegacy(legacy, decodeSolids(o['solids']), planes).nodes;
+  }
+  if (nodes.length === 0) {
+    // No sketches at all — an empty document still needs a host for new
+    // entities, the same rule the migration applies to an empty v1 file.
+    nodes = [
+      { kind: 'sketch', sketch: { id: newSketchId(), name: '草图1', plane: XY_PLANE, entities: [] } },
+    ];
+  }
 
   // ---- constraints ---------------------------------------------------------
   //
-  // Read *after* the entities, because the only sensible validation is
+  // Read *after* the tree, because the only sensible validation is
   // referential: a constraint pointing at a curve that is not in the file is
   // not a relationship, and keeping it would make every later solve skip a
   // broken row. Same defensive posture as entities — a bad entry is dropped
   // with a warning rather than failing the whole load.
-  const entityIds = new Set(entities.map((e) => e.id));
+  const entityIds = new Set<string>();
+  for (const n of nodes) {
+    if (n.kind !== 'sketch') continue;
+    for (const e of n.sketch.entities) entityIds.add(e.id);
+  }
   const constraintsRaw = Array.isArray(o['constraints']) ? (o['constraints'] as unknown[]) : [];
   const constraints: Constraint[] = [];
   let droppedConstraints = 0;
@@ -450,12 +572,20 @@ export function deserializeDocument(input: string | unknown): LoadResult {
     warnings.push(`跳过 ${droppedConstraints} 个无法识别的约束。`);
   }
 
-  const planes = decodePlanes(o['planes']);
-  const frames = decodeFrames(o['frames']);
-  // The active plane has to name a plane that actually exists — otherwise every
-  // new sketch would have nowhere to go.
-  const wanted = str(o['activePlane']);
-  const activePlane = planes.some((p) => p.id === wanted) ? wanted : (planes[0]?.id ?? XY_PLANE);
+  // ---- the editing context -------------------------------------------------
+  //
+  // The stored active sketch if it names one, otherwise the first sketch — and
+  // `activePlane` is *derived* from it rather than read, because every writer
+  // keeps the two in step and a hand-edited file must not be able to leave the
+  // status bar naming one plane while the canvas draws another.
+  const sketches = nodes.filter((n): n is { kind: 'sketch'; sketch: Sketch } => n.kind === 'sketch');
+  const wantedSketch = str(o['activeSketch']);
+  const active = sketches.find((s) => s.sketch.id === wantedSketch) ?? sketches[0];
+  const activeSketch: SketchId = active?.sketch.id ?? 'sketch-1';
+  const activePlane: PlaneId = active?.sketch.plane ?? XY_PLANE;
+
+  const metaRaw = (o['meta'] ?? {}) as Record<string, unknown>;
+  const now = new Date().toISOString();
 
   const doc: CadDocument = {
     meta: {
@@ -463,14 +593,15 @@ export function deserializeDocument(input: string | unknown): LoadResult {
       author: str(metaRaw['author'], ''),
       createdAt: str(metaRaw['createdAt'], now),
       modifiedAt: str(metaRaw['modifiedAt'], now),
+      // Read-in-is-migrated: the in-memory document is always current-shape.
       version: FILE_VERSION,
     },
     settings: decodeSettings(o['settings']),
     layers,
     currentLayer: layerIds.has(str(o['currentLayer'])) ? str(o['currentLayer']) : fallbackLayer,
-    entities,
+    nodes,
+    activeSketch,
     constraints,
-    solids: decodeSolids(o['solids']),
     planes,
     frames,
     activePlane,
@@ -480,16 +611,144 @@ export function deserializeDocument(input: string | unknown): LoadResult {
 }
 
 /**
- * Read the solids array, dropping anything malformed.
+ * Read the v2 `nodes` array. Unknown node kinds — and feature kinds from a
+ * newer build — are skipped with a warning rather than crashing: the version
+ * warning already said the file is ahead of us, and losing one node it cannot
+ * understand beats refusing to open the drawing.
+ */
+function decodeNodes(
+  raw: unknown[],
+  fallbackLayer: LayerId,
+  layerIds: ReadonlySet<LayerId>,
+  warnings: string[],
+): TreeNode[] {
+  const nodes: TreeNode[] = [];
+  let dropped = 0;
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') {
+      dropped += 1;
+      continue;
+    }
+    const o = item as Record<string, unknown>;
+    if (o['kind'] === 'sketch') {
+      const sketch = decodeSketchNode(o['sketch'], fallbackLayer, layerIds);
+      if (sketch) nodes.push({ kind: 'sketch', sketch });
+      else dropped += 1;
+    } else if (o['kind'] === 'feature') {
+      const feature = decodeFeatureNode(o['feature']);
+      if (feature) nodes.push({ kind: 'feature', feature });
+      else dropped += 1;
+    } else {
+      dropped += 1;
+    }
+  }
+  if (dropped > 0) warnings.push(`跳过 ${dropped} 个无法识别的树节点。`);
+  return nodes;
+}
+
+function decodeSketchNode(
+  raw: unknown,
+  fallbackLayer: LayerId,
+  layerIds: ReadonlySet<LayerId>,
+): Sketch | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as Record<string, unknown>;
+  const id = typeof o['id'] === 'string' ? o['id'] : null;
+  if (!id) return null;
+  const plane = typeof o['plane'] === 'string' ? o['plane'] : XY_PLANE;
+  const entitiesRaw = Array.isArray(o['entities']) ? (o['entities'] as unknown[]) : [];
+  const entities: Entity[] = [];
+  for (const item of entitiesRaw) {
+    const decoded = decodeEntityOnly(item, fallbackLayer);
+    if (!decoded) continue;
+    if (!layerIds.has(decoded.layer)) decoded.layer = fallbackLayer;
+    entities.push(decoded);
+  }
+  return { id, name: str(o['name']) || id, plane, entities };
+}
+
+/**
+ * Read a feature node. A `boolean` node from a newer build is skipped (with the
+ * version warning already given) instead of being silently coerced into
+ * something it is not.
+ */
+function decodeFeatureNode(raw: unknown): Feature | null {
+  if (!raw || typeof raw !== 'object') return null;
+  const o = raw as Record<string, unknown>;
+  const kind = o['kind'];
+  const id = typeof o['id'] === 'string' ? o['id'] : null;
+  const sketch = typeof o['sketch'] === 'string' ? o['sketch'] : null;
+  const layer = typeof o['layer'] === 'string' ? o['layer'] : null;
+  const profile = typeof o['profile'] === 'string' ? o['profile'] : null;
+  const suppressed = o['suppressed'] === true ? { suppressed: true } : {};
+  if (id && sketch && layer) {
+    if (kind === 'extrude') {
+      const height = num(o['height'], NaN);
+      if (Number.isFinite(height)) {
+        return { kind: 'extrude', id, name: str(o['name']) || id, ...suppressed, sketch, profile, height, layer };
+      }
+      return null;
+    }
+    if (kind === 'revolve') {
+      const axis = typeof o['axis'] === 'string' ? o['axis'] : null;
+      const angle = num(o['angle'], NaN);
+      if (axis && Number.isFinite(angle)) {
+        return { kind: 'revolve', id, name: str(o['name']) || id, ...suppressed, sketch, profile, axis, angle, layer };
+      }
+      return null;
+    }
+    if (kind === 'boolean') {
+      const op = o['op'];
+      const a = typeof o['a'] === 'string' ? o['a'] : null;
+      const b = typeof o['b'] === 'string' ? o['b'] : null;
+      // All three ops decode, even the two the evaluator refuses: a file that
+      // says "union" should come back as a node that says so, not vanish.
+      if ((op === 'subtract' || op === 'union' || op === 'intersect') && a && b) {
+        return { kind: 'boolean', id, name: str(o['name']) || id, ...suppressed, op, a, b, layer };
+      }
+      return null;
+    }
+    if (kind === 'hole') {
+      const solid = typeof o['solid'] === 'string' ? o['solid'] : null;
+      const at = vec3(o['at']);
+      const normal = vec3(o['normal']);
+      const diameter = num(o['diameter'], NaN);
+      const depth = num(o['depth'], NaN);
+      if (solid && at && normal && Number.isFinite(diameter) && Number.isFinite(depth)) {
+        return { kind: 'hole', id, name: str(o['name']) || id, ...suppressed, solid, at, normal, diameter, depth, layer };
+      }
+      return null;
+    }
+    if (kind === 'pattern') {
+      const source = typeof o['source'] === 'string' ? o['source'] : null;
+      const count = num(o['count'], NaN);
+      const spacing = num(o['spacing'], NaN);
+      // The second axis arrived after the first version of the pattern shipped,
+      // so it defaults to "one row" — a file written without it still means what
+      // it meant then.
+      const countV = num(o['countV'], 1);
+      const spacingV = num(o['spacingV'], 0);
+      if (source && Number.isFinite(count) && Number.isFinite(spacing) && Number.isFinite(countV) && Number.isFinite(spacingV)) {
+        return { kind: 'pattern', id, name: str(o['name']) || id, ...suppressed, source, count, spacing, countV, spacingV, layer };
+      }
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Read the v1 solids array, dropping anything malformed.
  *
  * There is nothing to normalise — a solid is four scalars — so this only guards
- * the shape. A solid whose sketch is missing is *kept*: the sketch may simply be
- * on a layer the loader skipped, and the render pass already treats a solid with
- * no source as "nothing to draw" rather than as a crash.
+ * the shape. A solid whose profile is missing is *kept*: the profile may simply
+ * be on a layer the loader skipped, and the render pass treats a feature with
+ * no profile as "nothing to draw" rather than as a crash. (Stage 2's evaluator
+ * is what turns that into a visible error node.)
  */
-function decodeSolids(raw: unknown): Solid[] {
+function decodeSolids(raw: unknown): LegacySolid[] {
   if (!Array.isArray(raw)) return [];
-  const out: Solid[] = [];
+  const out: LegacySolid[] = [];
   for (const item of raw) {
     if (!item || typeof item !== 'object') continue;
     const o = item as Record<string, unknown>;
@@ -501,6 +760,21 @@ function decodeSolids(raw: unknown): Solid[] {
     out.push({ id, source, height, layer });
   }
   return out;
+}
+
+/**
+ * Decode one entity record, keeping its v1 plane stamp separate.
+ *
+ * v2 files carry the plane on the sketch, so the stamp is absent there and
+ * defaults to XY; v1 files stamped it per entity, and the migration's grouping
+ * needs it — which is why it travels beside the entity instead of on it.
+ */
+function decodeEntity(raw: unknown, fallbackLayer: string): LegacyEntity | null {
+  const entity = decodeEntityOnly(raw, fallbackLayer);
+  if (!entity) return null;
+  const o = raw as Record<string, unknown>;
+  const plane = typeof o['plane'] === 'string' ? o['plane'] : XY_PLANE;
+  return { entity, plane };
 }
 
 function vec3(raw: unknown): [number, number, number] | null {

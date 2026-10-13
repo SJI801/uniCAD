@@ -71,7 +71,7 @@ impl Frame {
     }
 }
 
-fn norm3(a: [f64; 3]) -> Option<[f64; 3]> {
+pub(crate) fn norm3(a: [f64; 3]) -> Option<[f64; 3]> {
     let l = (a[0] * a[0] + a[1] * a[1] + a[2] * a[2]).sqrt();
     if !(l > 1e-12) {
         return None;
@@ -282,6 +282,314 @@ pub fn extrude(loop_pts: &[Vec2], height: f64, frame: &Frame) -> Mesh {
     mesh
 }
 
+/// Revolve a closed loop around an axis **lying in the same plane**, by
+/// `angle` radians — the lathe operation. `None` when the loop is not a valid
+/// solid of revolution (see below).
+///
+/// The axis arrives in the plane's own 2D coordinates, because that is the
+/// only frame the front end has: the user drew a profile and a centreline in
+/// one sketch. Working in those coordinates is also what keeps this function
+/// the same shape as `extrude`.
+///
+/// **The change of coordinates is the whole algorithm.** Map each loop point
+/// `p` to `(s, r)` — distance along the axis, signed distance from it:
+/// `s = (p − a)·d`, `r = d × (p − a)`. In `(s, r)` the surface of revolution is
+/// exactly an *extrusion along θ*: the point `(s, r)` at angle `θ` sits at
+/// `a + s·d̂ + r·(cos θ·b̂ + sin θ·n̂)`, where `b̂` is the in-plane perpendicular
+/// to the axis and `n̂` the plane normal. So the walls get the same winding rule
+/// as `extrude` (loop normalised CCW, outward normal = edge direction rotated
+/// −90°), the caps reuse `triangulate`, and only the vertex mapping differs.
+///
+/// `None` — a *modelling* error, not a crash — when the profile touches or
+/// crosses the axis: a point at `r = 0` is on the axis, a sign change means the
+/// profile straddles it, and either way the swept surface folds through itself.
+/// Same posture as `closed_loop` returning `None` for half a curve: the front
+/// end has a sentence for it.
+///
+/// **Signs.** The sweep is right-handed about `axis_dir`, so `(d, a)` and
+/// `(−d, −a)` are the *same solid* — that equivalence plus the `r > 0`
+/// normalisation below is what lets the whole function stay in one code path:
+///
+///   - the profile is reflected through the axis point when it sits entirely at
+///     `r < 0` (with `angle` negated, which is exactly the equivalence above),
+///     so `r > 0` always holds by the time geometry is built;
+///   - a negative `angle` then only flips the *outward* direction, so it is
+///     applied to the normals — not by flipping the axis, which the
+///     normalisation would immediately undo.
+pub fn revolve(
+    loop_pts: &[Vec2],
+    axis_point: Vec2,
+    axis_dir: Vec2,
+    angle: f64,
+    tol: f64,
+    max_seg: u32,
+    frame: &Frame,
+) -> Option<Mesh> {
+    if loop_pts.len() < 3 {
+        return None;
+    }
+    let mut d = axis_dir.normalized();
+    if d.length() <= 1e-12 {
+        return None;
+    }
+    let mut ang = angle;
+    if !(ang.abs() > 1e-9) {
+        return None;
+    }
+
+    // ---- into (s, r) -----------------------------------------------------
+    let mut sr: Vec<Vec2> = loop_pts
+        .iter()
+        .map(|p| {
+            let w = Vec2::new(p.x - axis_point.x, p.y - axis_point.y);
+            Vec2::new(w.dot(d), d.cross(w))
+        })
+        .collect();
+
+    // Entirely on one side of the axis, and not touching it. A mixed sign means
+    // the profile crosses; `|r|` below the tolerance means it sits on the axis
+    // and the sweep collapses there.
+    if sr.iter().all(|q| q.y < 0.0) {
+        // Reflect through the axis point: same solid, `r > 0` again, and the
+        // angle negated to keep it the same solid (see the note above).
+        d = Vec2::new(-d.x, -d.y);
+        for q in sr.iter_mut() {
+            *q = Vec2::new(-q.x, -q.y);
+        }
+        ang = -ang;
+    }
+    if sr.iter().any(|q| q.y <= 1e-9) {
+        return None;
+    }
+
+    // CCW from here on, so "interior on the left of a→b" holds like extrude.
+    if signed_area(&sr) < 0.0 {
+        sr.reverse();
+    }
+    let n = sr.len();
+    let r_max = sr.iter().fold(0.0f64, |m, q| m.max(q.y));
+
+    // A negative sweep reverses every triangle's cross product, so the *winding*
+    // is what flips. The wall normals do not: a wall's material is on the `r`
+    // side of it whichever way the sweep runs, so the outward direction is the
+    // same. The caps are the opposite — there the sweep's sign is exactly what
+    // decides which side the material is on.
+    let flip = ang < 0.0;
+
+    // Angular resolution uses the kernel's one chord-tolerance rule, with `r_max`
+    // in the role a circle radius plays everywhere else.
+    let segs = arc_segment_count(ang, r_max, tol, max_seg);
+
+    let mut mesh = Mesh::new(*frame);
+
+    // The in-plane basis, in the frame's **local** space (x = plane u, y = v,
+    // z = the plane normal). `tri` maps local → world, so everything below is
+    // built local and never has to know which datum plane this is.
+    let a3 = [d.x, d.y, 0.0];
+    let b3 = [-d.y, d.x, 0.0];
+    let n3 = [0.0, 0.0, 1.0];
+    let rot = |v: [f64; 3], t: f64| -> [f64; 3] {
+        // Rotate a direction around the axis: split it into (along-axis,
+        // in-plane-perp, plane-normal) components, rotate the latter two as a
+        // pair, map back to local xyz. Doing it in the (a3, b3, n3) basis is
+        // what makes this a two-line rotation instead of a Rodrigues formula.
+        let dot = |x: [f64; 3], y: [f64; 3]| x[0] * y[0] + x[1] * y[1] + x[2] * y[2];
+        let ca = dot(v, a3);
+        let cb = dot(v, b3);
+        let cn = dot(v, n3);
+        let (c, s) = (t.cos(), t.sin());
+        let rb = cb * c + cn * s;
+        let rn = cn * c - cb * s;
+        [
+            ca * a3[0] + rb * b3[0] + rn * n3[0],
+            ca * a3[1] + rb * b3[1] + rn * n3[1],
+            ca * a3[2] + rb * b3[2] + rn * n3[2],
+        ]
+    };
+    let at = |q: Vec2, t: f64| -> [f64; 3] {
+        let (c, s) = (t.cos(), t.sin());
+        [
+            axis_point.x + q.x * a3[0] + q.y * (c * b3[0] + s * n3[0]),
+            axis_point.y + q.x * a3[1] + q.y * (c * b3[1] + s * n3[1]),
+            q.x * a3[2] + q.y * (c * b3[2] + s * n3[2]),
+        ]
+    };
+
+    // ---- walls -----------------------------------------------------------
+    for i in 0..n {
+        let a = sr[i];
+        let b = sr[(i + 1) % n];
+        let e = Vec2::new(b.x - a.x, b.y - a.y);
+        let len = e.length();
+        if len <= 1e-12 {
+            continue;
+        }
+        let (nx, ny) = (e.y / len, -e.x / len);
+        for j in 0..segs {
+            let t0 = ang * (j as f64) / (segs as f64);
+            let t1 = ang * ((j + 1) as f64) / (segs as f64);
+            // The wall between two angles is a ruled surface, not a plane, so a
+            // single flat normal is an approximation by construction. Take it at
+            // the mid-angle: the facet then sits symmetrically around its own
+            // normal instead of leaning towards one end.
+            let tm = 0.5 * (t0 + t1);
+            let nn = {
+                let (c, s) = (tm.cos(), tm.sin());
+                [
+                    nx * a3[0] + ny * (c * b3[0] + s * n3[0]),
+                    nx * a3[1] + ny * (c * b3[1] + s * n3[1]),
+                    nx * a3[2] + ny * (c * b3[2] + s * n3[2]),
+                ]
+            };
+            if flip {
+                mesh.tri(at(a, t0), at(b, t1), at(b, t0), nn);
+                mesh.tri(at(a, t0), at(a, t1), at(b, t1), nn);
+            } else {
+                mesh.tri(at(a, t0), at(b, t0), at(b, t1), nn);
+                mesh.tri(at(a, t0), at(b, t1), at(a, t1), nn);
+            }
+        }
+    }
+
+    // ---- caps ------------------------------------------------------------
+    //
+    // Only when the sweep does not close on itself: a full turn is already a
+    // closed surface, and capping it would put two coincident sheets inside the
+    // solid.
+    let full = (ang.abs() - std::f64::consts::TAU).abs() < 1e-9;
+    if !full {
+        // A CCW loop in `(s, r)` maps to a CCW loop facing +n̂, so the θ = 0 cap
+        // is the reversed one and the θ = angle cap keeps its winding — exactly
+        // extrude's bottom/top pair, and both swap when the sweep does.
+        let end_normal = rot(n3, ang);
+        for t in triangulate(&sr) {
+            let (a, b, c) = (sr[t[0]], sr[t[1]], sr[t[2]]);
+            if flip {
+                // Material spans `θ ∈ [ang, 0]`, so the start cap faces +n̂ and the
+                // end cap faces *back* along the sweep.
+                mesh.tri(at(a, 0.0), at(b, 0.0), at(c, 0.0), [0.0, 0.0, 1.0]);
+                mesh.tri(
+                    at(a, ang),
+                    at(c, ang),
+                    at(b, ang),
+                    [-end_normal[0], -end_normal[1], -end_normal[2]],
+                );
+            } else {
+                mesh.tri(at(a, 0.0), at(c, 0.0), at(b, 0.0), [0.0, 0.0, -1.0]);
+                mesh.tri(at(a, ang), at(b, ang), at(c, ang), end_normal);
+            }
+        }
+    }
+
+    Some(mesh)
+}
+
+/// Signed volume of a flat-shaded triangle soup, via the divergence theorem.
+/// Positive when the triangles wind outward. One number that checks geometry
+/// *and* orientation — a mesh whose normals face inward comes back negative.
+///
+/// The `6`-float stride is the trap: a vertex is position **plus** normal, so
+/// the three corners of a triangle sit at offsets 0, 6 and 12 — reading them at
+/// 0/3/6 silently picks up normals as if they were positions (and returns 0 for
+/// a box, which is how this was found).
+///
+/// Test-only, but deliberately outside the test module: `boolean.rs` needs the
+/// same measure, and two copies would be two chances to get the stride wrong.
+#[cfg(test)]
+pub(crate) fn soup_volume(verts: &[f32]) -> f64 {
+    let mut v = 0.0;
+    let mut i = 0;
+    while i + 17 < verts.len() {
+        let p = |k: usize| {
+            [verts[i + k] as f64, verts[i + k + 1] as f64, verts[i + k + 2] as f64]
+        };
+        let (a, b, c) = (p(0), p(6), p(12));
+        v += a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0])
+            + a[2] * (b[0] * c[1] - b[1] * c[0]);
+        i += 18;
+    }
+    v / 6.0
+}
+
+/// Nearest hit of a ray against a flat-shaded triangle soup.
+///
+/// Returns `(t, point, normal)`: the distance along `dir`, the hit point, and
+/// the **stored** flat-shading normal of the face that was hit — the normal the
+/// user actually sees, which is what a hole's axis has to follow.
+///
+/// Back faces count: a ray that starts inside a solid must still find the far
+/// wall (that is what makes a second hole drilled into the first one's bore
+/// land on the right surface). `dir` need not be normalised — `t` is in units
+/// of `dir`.
+///
+/// Möller–Trumbore, with the barycentric test slackened by a small epsilon so a
+/// hit exactly on a shared edge is not dropped by rounding.
+pub fn pick_mesh(soup: &[f32], origin: [f64; 3], dir: [f64; 3]) -> Option<(f64, [f64; 3], [f64; 3])> {
+    let eps = 1e-9;
+    let mut best: Option<(f64, [f64; 3], [f64; 3])> = None;
+    let mut i = 0;
+    while i + 17 < soup.len() {
+        let at = |k: usize| [soup[i + k] as f64, soup[i + k + 1] as f64, soup[i + k + 2] as f64];
+        let (a, b, c) = (at(0), at(6), at(12));
+        let e1 = sub3(b, a);
+        let e2 = sub3(c, a);
+        let pvec = cross3(dir, e2);
+        let det = dot3(e1, pvec);
+        if det.abs() > 1e-12 {
+            let inv = 1.0 / det;
+            let tvec = sub3(origin, a);
+            let u = dot3(tvec, pvec) * inv;
+            if u >= -eps && u <= 1.0 + eps {
+                let qvec = cross3(tvec, e1);
+                let v = dot3(dir, qvec) * inv;
+                if v >= -eps && u + v <= 1.0 + eps {
+                    let t = dot3(e2, qvec) * inv;
+                    if t > eps && best.map_or(true, |(bt, _, _)| t < bt) {
+                        let normal = [soup[i + 3] as f64, soup[i + 4] as f64, soup[i + 5] as f64];
+                        let point = [
+                            origin[0] + dir[0] * t,
+                            origin[1] + dir[1] * t,
+                            origin[2] + dir[2] * t,
+                        ];
+                        best = Some((t, point, normal));
+                    }
+                }
+            }
+        }
+        i += 18;
+    }
+    best
+}
+
+fn sub3(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+}
+
+fn dot3(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// `(u, v)` completing a right-handed frame around `n`, which must be unit.
+///
+/// Crosses `n` with whichever world axis is *least* aligned with it: that choice
+/// is what keeps the result well-conditioned for every direction, including the
+/// ones where a naive `(1,0,0)` would be parallel.
+pub fn perpendicular_basis(n: [f64; 3]) -> ([f64; 3], [f64; 3]) {
+    let ax = n[0].abs();
+    let ay = n[1].abs();
+    let az = n[2].abs();
+    let helper = if ax <= ay && ax <= az {
+        [1.0, 0.0, 0.0]
+    } else if ay <= az {
+        [0.0, 1.0, 0.0]
+    } else {
+        [0.0, 0.0, 1.0]
+    };
+    let u = norm3(cross3(helper, n)).unwrap_or([0.0, 1.0, 0.0]);
+    let v = norm3(cross3(n, u)).unwrap_or([0.0, 0.0, 1.0]);
+    (u, v)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,6 +649,9 @@ mod tests {
             i += 6;
         }
         assert_eq!(outward, 24, "every wall vertex has an outward normal");
+        // 10 × 10 × 5 = 500 — and positive, i.e. wound outward.
+        let v = signed_volume(&m);
+        assert!((v - 500.0).abs() < 1e-9, "box volume {v}, expected 500");
     }
 
     /// Both caps and the walls survive; the caps are 2 tris each and the sides 6.
@@ -393,6 +704,228 @@ mod tests {
         assert!(closed_loop(&line, 0.05, 64).is_none());
         let arc = Prim::Arc(Arc::new(Vec2::new(0.0, 0.0), 5.0, 0.0, 1.0));
         assert!(closed_loop(&arc, 0.05, 64).is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Ray picking (work package 3.2 — clicking a face in the 3D view)
+    // -----------------------------------------------------------------------
+
+    /// A ray down the middle of a box hits the near face first, at the right
+    /// point, carrying that face's own outward normal.
+    #[test]
+    fn a_ray_down_the_middle_of_a_box_hits_the_near_face() {
+        let m = extrude(&square(), 5.0);
+        let (t, p, n) = pick_mesh(&m.verts, [5.0, 5.0, 20.0], [0.0, 0.0, -1.0]).expect("must hit");
+        assert!((t - 15.0).abs() < 1e-9, "t {t} — from z = 20 down to the top cap");
+        assert!(
+            (p[0] - 5.0).abs() < 1e-9 && (p[1] - 5.0).abs() < 1e-9 && (p[2] - 5.0).abs() < 1e-9,
+            "hit point {p:?}"
+        );
+        assert!((n[2] - 1.0).abs() < 1e-9, "the top face's outward normal is +Z");
+    }
+
+    /// Missing returns nothing — not the nearest edge, not a default.
+    #[test]
+    fn a_ray_that_misses_returns_nothing() {
+        let m = extrude(&square(), 5.0);
+        assert!(pick_mesh(&m.verts, [50.0, 50.0, 20.0], [0.0, 0.0, -1.0]).is_none(), "beside the box");
+        assert!(pick_mesh(&m.verts, [5.0, -50.0, 2.5], [1.0, 0.0, 0.0]).is_none(), "past the side");
+    }
+
+    /// Back faces are hits too: a ray from inside finds the far wall. A second
+    /// hole drilled into the first one's bore depends on exactly this.
+    #[test]
+    fn a_ray_from_inside_finds_the_far_wall() {
+        let m = extrude(&square(), 5.0);
+        let (t, p, _) = pick_mesh(&m.verts, [5.0, 5.0, 2.5], [0.0, 0.0, -1.0]).expect("must hit");
+        assert!((t - 2.5).abs() < 1e-9, "t {t}");
+        assert!(p[2].abs() < 1e-9, "the bottom cap, at z = 0");
+    }
+
+    /// The perpendicular basis is orthogonal, unit and right-handed for every
+    /// direction — including the three where a naive helper axis is parallel.
+    #[test]
+    fn perpendicular_basis_is_sound_in_every_direction() {
+        let d = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+        for raw in [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.6, 0.8, 0.0],
+            [0.58, 0.58, 0.58],
+        ] {
+            let n = norm3(raw).unwrap();
+            let (u, v) = perpendicular_basis(n);
+            assert!(d(u, n).abs() < 1e-12 && d(v, n).abs() < 1e-12, "not perpendicular for {raw:?}");
+            assert!((d(u, u) - 1.0).abs() < 1e-12 && (d(v, v) - 1.0).abs() < 1e-12, "not unit");
+            assert!(d(cross3(u, v), n) > 1e-9, "not right-handed for {raw:?}");
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Revolve
+    // -----------------------------------------------------------------------
+
+    /// Signed volume of a closed mesh — see `soup_volume` above for why the
+    /// stride matters.
+    fn signed_volume(m: &Mesh) -> f64 {
+        soup_volume(&m.verts)
+    }
+
+    /// A rectangle above the X axis, revolved about it: a tube, inner r 10,
+    /// outer r 20, length 20. The axis is `+X` through the origin, so the plane
+    /// coordinates double as `(s, r)` and the numbers below read directly.
+    fn tube_section() -> Vec<Vec2> {
+        vec![
+            Vec2::new(0.0, 10.0),
+            Vec2::new(20.0, 10.0),
+            Vec2::new(20.0, 20.0),
+            Vec2::new(0.0, 20.0),
+        ]
+    }
+
+    fn revolve_about_x(pts: &[Vec2], angle: f64) -> Option<Mesh> {
+        super::revolve(
+            pts,
+            Vec2::new(0.0, 0.0),
+            Vec2::new(1.0, 0.0),
+            angle,
+            TOL,
+            MAX_SEG,
+            &Frame::xy(),
+        )
+    }
+
+    const TOL: f64 = 0.05;
+    const MAX_SEG: u32 = 256;
+
+    /// Volume of the **tessellated** lathe of a `(s, r)` rectangle.
+    ///
+    /// The exact lathe volume is `Δθ·r̄·A` (Pappus), but the mesh's radial walls
+    /// are chords between angular samples, not arcs — so the mesh is smaller by
+    /// exactly `segs·sin(Δθ)` per wedge, which is what a correct mesh must hit.
+    /// Asserting the exact value instead would call every correct mesh 0.3% wrong.
+    fn lathe_volume(segs: u32, angle: f64, r_in: f64, r_out: f64, length: f64) -> f64 {
+        let dtheta = angle.abs() / segs as f64;
+        length * (r_out * r_out - r_in * r_in) / 2.0 * (segs as f64) * dtheta.sin()
+    }
+
+    /// A full turn is a closed surface: walls only, no caps.
+    #[test]
+    fn revolves_a_section_into_a_tube() {
+        let m = revolve_about_x(&tube_section(), std::f64::consts::TAU).expect("a valid section");
+        let segs = arc_segment_count(std::f64::consts::TAU, 20.0, TOL, MAX_SEG);
+        // 4 profile edges × `segs` quads × 2 triangles, and no caps.
+        assert_eq!(m.vertex_count(), 4 * segs as usize * 2 * 3, "tube triangle count");
+
+        // 20 long, r 10→20: 6000π before tessellation, `segs·sin(Δθ)` of it after.
+        let v = signed_volume(&m);
+        let expect = lathe_volume(segs, std::f64::consts::TAU, 10.0, 20.0, 20.0);
+        assert!(
+            (v - expect).abs() < expect * 1e-4,
+            "tube volume {v}, expected {expect}"
+        );
+        // Positive volume = outward normals.
+        assert!(v > 0.0, "the tube is inside-out");
+    }
+
+    /// Less than a turn needs the two flat section caps, and the wall count
+    /// scales with the angle. Caps that were missing (or wound the wrong way)
+    /// show up as a volume short of the quarter-tube.
+    #[test]
+    fn a_partial_turn_gets_caps() {
+        let quarter = std::f64::consts::FRAC_PI_2;
+        let m = revolve_about_x(&tube_section(), quarter).expect("a valid section");
+        let segs = arc_segment_count(quarter, 20.0, TOL, MAX_SEG);
+        // Walls + 2 caps × 2 triangles (the ear clipper on a rectangle).
+        assert_eq!(m.vertex_count(), (4 * segs as usize * 2 + 4) * 3, "walls + caps");
+
+        let v = signed_volume(&m);
+        let expect = lathe_volume(segs, quarter, 10.0, 20.0, 20.0);
+        assert!(
+            (v - expect).abs() < expect * 1e-4,
+            "quarter-tube volume {v}, expected {expect}"
+        );
+        assert!(v > 0.0, "the quarter tube is inside-out");
+    }
+
+    /// A profile touching the axis folds the surface through itself; a profile
+    /// straddling it is worse. Both are modelling errors, not crashes.
+    #[test]
+    fn profiles_on_or_across_the_axis_are_refused() {
+        let touching = vec![
+            Vec2::new(0.0, 0.0),
+            Vec2::new(10.0, 0.0),
+            Vec2::new(10.0, 5.0),
+        ];
+        assert!(revolve_about_x(&touching, 1.0).is_none(), "profile on the axis");
+
+        let crossing = vec![
+            Vec2::new(0.0, -5.0),
+            Vec2::new(10.0, -5.0),
+            Vec2::new(10.0, 5.0),
+        ];
+        assert!(revolve_about_x(&crossing, 1.0).is_none(), "profile across the axis");
+    }
+
+    /// A negative angle sweeps the other way: same solid, mirrored about the
+    /// plane of the profile — and, being a solid, still outward-wound.
+    #[test]
+    fn a_negative_angle_revolves_the_other_way() {
+        let half = std::f64::consts::PI;
+        let fwd = revolve_about_x(&tube_section(), half).expect("valid");
+        let back = revolve_about_x(&tube_section(), -half).expect("valid");
+        assert_eq!(fwd.vertex_count(), back.vertex_count());
+        let zmax = |m: &Mesh| {
+            let mut t = f64::MIN;
+            let mut i = 0;
+            while i < m.verts.len() {
+                t = t.max(m.verts[i + 2] as f64);
+                i += 6;
+            }
+            t
+        };
+        assert!(zmax(&fwd) > 1.0 && zmax(&back) < 1e-9, "opposite hemispheres");
+        assert!(signed_volume(&back) > 0.0, "the negative sweep is inside-out");
+        let expect = lathe_volume(
+            arc_segment_count(half, 20.0, TOL, MAX_SEG),
+            half,
+            10.0,
+            20.0,
+            20.0,
+        );
+        assert!(
+            (signed_volume(&back) - expect).abs() < expect * 1e-4,
+            "half-tube volume"
+        );
+    }
+
+    /// A profile **below** the axis is the mirror image of one above it: the
+    /// same volume, and still outward-wound. This is the case the `r > 0`
+    /// normalisation exists for.
+    #[test]
+    fn a_profile_below_the_axis_still_sweeps_outward() {
+        let below: Vec<Vec2> = tube_section()
+            .into_iter()
+            .map(|p| Vec2::new(p.x, -p.y))
+            .collect();
+        let m = revolve_about_x(&below, std::f64::consts::TAU).expect("valid");
+        let segs = arc_segment_count(std::f64::consts::TAU, 20.0, TOL, MAX_SEG);
+        let v = signed_volume(&m);
+        let expect = lathe_volume(segs, std::f64::consts::TAU, 10.0, 20.0, 20.0);
+        assert!((v - expect).abs() < expect * 1e-4, "mirrored tube volume {v}");
+        assert!(v > 0.0, "the mirrored tube is inside-out");
+    }
+
+    /// Winding is normalised, exactly as it is for extrude.
+    #[test]
+    fn revolve_winding_does_not_change_the_solid() {
+        let mut cw = tube_section();
+        cw.reverse();
+        let m = revolve_about_x(&cw, std::f64::consts::TAU).expect("valid");
+        let ccw = revolve_about_x(&tube_section(), std::f64::consts::TAU).expect("valid");
+        assert_eq!(m.vertex_count(), ccw.vertex_count());
+        assert!((signed_volume(&m) - signed_volume(&ccw)).abs() < 1e-6);
     }
 
     #[test]

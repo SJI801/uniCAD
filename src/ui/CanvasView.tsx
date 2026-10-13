@@ -9,7 +9,7 @@
 import { useEffect, useMemo, useRef, useState, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { GlRenderer, hexToRgba, type RenderStyle } from '../render/gl';
-import { clampPitch, hitPlane, pickPlane, viewProj } from '../render/orbit';
+import { clampPitch, hitPlane, pickPlane, screenRay, viewProj } from '../render/orbit';
 import { buildGrid } from '../render/grid';
 import { resolveRenderStyle, UI_COLORS } from '../render/style';
 import {
@@ -29,27 +29,27 @@ import {
 import { constraintBadges, constraintGuides } from '../render/constraintMarks';
 import { dofMarkers } from '../render/dofMarks';
 import { isUnderDefined } from '../core/constraints';
+import { allEntities, findEntity, sketchEntities } from '../core/doc';
 import PieMenu from './PieMenuView';
 import { buildPieMenu, runPieAction } from './pieMenu';
 import { useEditor } from '../state/editorStore';
 import {
   SceneBuffer,
   entityBounds,
-  extrudeMesh,
   isKernelReady,
   packScene,
   pickAll,
+  pickMesh,
   selectInRect,
   snapQuery,
   snapKindFromTag,
   applyConstraints,
   initKernel,
+  type MeshHit,
 } from '../core/kernel';
 import {
   findPlane,
   packOsnapMask,
-  planeFrame,
-  planeOf,
   CONSTRAINT_TAG,
 } from '../core/types';
 import type { DocPlane, Entity, EntityId, Mat, Vec2 } from '../core/types';
@@ -62,6 +62,15 @@ import { adaptiveGridSpacing, clipMatrixOf } from '../render/camera';
 // ---------------------------------------------------------------------------
 
 type DragKind = 'none' | 'pan' | 'window' | 'move' | 'orbit';
+
+/**
+ * What a freshly clicked hole starts as: ⌀5 through. Through because "a hole"
+ * most often means "get through this wall", and both numbers are one
+ * double-click away in the feature tree — a dialog *before* the hole exists
+ * would be a form asking about something the user has not seen yet.
+ */
+const DEFAULT_HOLE_DIAMETER = 5;
+const DEFAULT_HOLE_DEPTH = 0;
 
 /**
  * Datum plane extent in model units — big enough to read as a plane in space.
@@ -102,6 +111,21 @@ export default function CanvasView(): React.ReactElement {
   const rafRef = useRef<number>(0);
   const dirtyRef = useRef(true);
   /**
+   * 上一次真正生效的视口尺寸（**取整后**的 CSS 像素 + dpr）。
+   *
+   * 存在这里而不是放进 store：它只是「这次的 resize 事件要不要干活」的判据，
+   * 与文档、视图都无关；进 store 反而会让每次亚像素抖动都触发一次 React 重渲染。
+   */
+  const sizeRef = useRef<{ w: number; h: number; dpr: number }>({ w: 0, h: 0, dpr: 0 });
+  /**
+   * 「立刻画一帧」的入口，由渲染循环填进来（`drawFrame` 是那个 effect 里的闭包）。
+   *
+   * 尺寸变化时要用它：改 `canvas.width/height` 必然清空绘图缓冲，而等下一个 rAF
+   * 补画意味着中间露出空白的一帧 —— 那就是可见的闪烁。清屏与重画必须落在同一个
+   * 任务里。首次挂载时它是 `null`（渲染循环还没建起来），循环自己的第一帧会画。
+   */
+  const drawNowRef = useRef<(() => void) | null>(null);
+  /**
    * Where the mouse meets the **active datum plane**, in world space.
    *
    * The 3D view has no 2D cursor: the mouse is a ray, and the point that matters
@@ -128,11 +152,7 @@ export default function CanvasView(): React.ReactElement {
    * per label per frame.
    */
   const dimLayerRef = useRef<HTMLDivElement | null>(null);
-  /** Log a render-frame failure once, not once per frame. */
-  const frameErrorRef = useRef(false);
-
-  /**
-   * 画布上正在就地编辑的尺寸（ROADMAP 0.2 的「尺寸标签改值」）。
+  /** 画布上正在就地编辑的尺寸（ROADMAP 0.2 的「尺寸标签改值」）。
    *
    * 放在 React state 而不是那个每帧重建的标注池里：编辑期间**不能**被渲染循环
    * 覆写。池子照旧每帧更新（标注还在原位、只是被输入框盖住），输入框自己独立
@@ -252,9 +272,22 @@ export default function CanvasView(): React.ReactElement {
     const apply = (): void => {
       const rect = container.getBoundingClientRect();
       const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const w = Math.max(1, Math.round(rect.width));
+      const h = Math.max(1, Math.round(rect.height));
+      // 只在**取整后**的尺寸真的变了才动。ResizeObserver 会被亚像素抖动反复唤醒
+      // （字体度量、面板边框、状态栏里 chip 文字宽度变化…），而这里每响应一次就是
+      // 一次 store 写入 + 一次整帧重绘 —— 全都白做，尺寸根本没变。
+      const was = sizeRef.current;
+      if (was.w === w && was.h === h && was.dpr === dpr) return;
+      sizeRef.current = { w, h, dpr };
       renderer.resize(rect.width, rect.height, dpr);
       setView({ width: rect.width, height: rect.height, dpr });
       dirtyRef.current = true;
+      // 给 canvas 赋 width/height 会**重建绘图缓冲并清空**（WebGL 的规矩，躲不掉）。
+      // 只标脏的话，画面要等下一个 rAF（最长 16ms）才回来，中间那一版是空的 ——
+      // 用户看到的就是「闪一下」。所以尺寸一变就**立刻**补画：清屏与重画落在同一
+      // 个任务里，合成器拿到的永远是画好的那一帧。
+      drawNowRef.current?.();
     };
 
     apply();
@@ -309,9 +342,7 @@ export default function CanvasView(): React.ReactElement {
       if (!isKernelReady()) return null;
       const v = viewRef.current;
       const settings = doc.settings;
-      const snappable = doc.entities.filter(
-        (e) => isSnappable(doc, e) && planeOf(e) === doc.activePlane,
-      );
+      const snappable = sketchEntities(doc).filter((e) => isSnappable(doc, e));
       if (snappable.length === 0) return null;
 
       const scene = packScene(snappable, () => true);
@@ -324,7 +355,7 @@ export default function CanvasView(): React.ReactElement {
       if (!kind) return null;
       // Map the kernel's index (into the filtered list) back to the entity array.
       const entity = snappable[hit.entity];
-      const entityIndex = entity ? doc.entities.findIndex((e) => e.id === entity.id) : -1;
+      const entityIndex = entity ? allEntities(doc).findIndex((e) => e.id === entity.id) : -1;
       return { point: { x: hit.x, y: hit.y }, kind, entityIndex };
     },
     [doc],
@@ -466,9 +497,7 @@ export default function CanvasView(): React.ReactElement {
       if (!isKernelReady()) return;
       const v = viewRef.current;
       const world = toWorld(screen);
-      const pickable = doc.entities.filter(
-        (e) => isPickable(doc, e) && planeOf(e) === doc.activePlane,
-      );
+      const pickable = sketchEntities(doc).filter((e) => isPickable(doc, e));
       if (pickable.length === 0) {
         setHover(null);
         return;
@@ -541,9 +570,7 @@ export default function CanvasView(): React.ReactElement {
       if (!isKernelReady()) return;
 
       // ---- selection tool behaviour ----
-      const pickable = doc.entities.filter(
-        (e) => isPickable(doc, e) && planeOf(e) === doc.activePlane,
-      );
+      const pickable = sketchEntities(doc).filter((e) => isPickable(doc, e));
       const scene = packScene(pickable, () => true);
       const tol = doc.settings.pickAperturePx * viewRef.current.scale;
       const hits = pickAll(scene, world, tol, 512);
@@ -565,7 +592,7 @@ export default function CanvasView(): React.ReactElement {
           pushLog('完全定义模式：拖动已锁定，请通过尺寸修改驱动');
           return;
         }
-        const originals = current.doc.entities
+        const originals = sketchEntities(current.doc)
           .filter((e) => current.selection.has(e.id))
           .map((e) => structuredClone(e));
         dragRef.current = {
@@ -593,6 +620,47 @@ export default function CanvasView(): React.ReactElement {
       setMode('selecting');
     },
     [clearSelection, doc, localScreen, select, selection, setMode, toWorld, toggleSelect],
+  );
+
+  /**
+   * Drill a hole where the click landed on a solid's face (work package 3.2).
+   *
+   * Picked against the **visible** meshes only — a consumed operand is hidden,
+   * so a click can never land on a surface the user cannot see. That single rule
+   * is what makes a second hole chain onto the first hole's result instead of
+   * reopening the original solid.
+   *
+   * The ray is a camera concern (`screenRay`); the intersection is geometry and
+   * stays in the kernel (`pickMesh`), next to the 2D picker.
+   */
+  const drillAt = useCallback(
+    (screen: Vec2): void => {
+      const st = useEditor.getState();
+      const { view, orbit, featureEval } = st;
+      const aspect = view.width / Math.max(1, view.height);
+      const ndcX = (screen.x / Math.max(1, view.width)) * 2 - 1;
+      const ndcY = 1 - (screen.y / Math.max(1, view.height)) * 2;
+      const ray = screenRay(orbit, aspect, ndcX, ndcY);
+
+      let best: { id: string; hit: MeshHit } | null = null;
+      for (const item of featureEval.items) {
+        if (item.status !== 'ok' || item.verts.length === 0) continue;
+        const hit = pickMesh(item.verts, ray.origin, ray.dir);
+        if (hit && (!best || hit.t < best.hit.t)) best = { id: item.feature.id, hit };
+      }
+      if (!best) {
+        pushLog('没点到实体表面：切到 3D，点在一个面上。');
+        return;
+      }
+      st.drillHole(
+        best.id,
+        best.hit.point,
+        best.hit.normal,
+        DEFAULT_HOLE_DIAMETER,
+        DEFAULT_HOLE_DEPTH,
+      );
+    },
+    [pushLog],
   );
 
   const onPointerUp = useCallback(
@@ -631,9 +699,7 @@ export default function CanvasView(): React.ReactElement {
           Math.abs(screen.x - drag.startScreen.x) > 3 || Math.abs(screen.y - drag.startScreen.y) > 3;
         if (movedEnough && isKernelReady()) {
           const crossing = world.x < drag.startWorld.x; // AutoCAD: right-to-left = crossing
-          const pickable = doc.entities.filter(
-        (e) => isPickable(doc, e) && planeOf(e) === doc.activePlane,
-      );
+          const pickable = sketchEntities(doc).filter((e) => isPickable(doc, e));
           const scene = packScene(pickable, () => true);
           const indices = selectInRect(scene, drag.startWorld, world, crossing);
           const ids = indices.map((i) => pickable[i]?.id).filter((x): x is string => Boolean(x));
@@ -651,12 +717,23 @@ export default function CanvasView(): React.ReactElement {
       if (drag.kind === 'orbit') {
         const moved =
           Math.abs(screen.x - drag.startScreen.x) > 3 || Math.abs(screen.y - drag.startScreen.y) > 3;
-        const clicked = clickPlaneRef.current;
-        // A click rather than a drag: offer that plane as the base of a new
-        // datum plane. Dragging still orbits and offers nothing.
-        if (!moved && clicked) {
-          setDatumBase(clicked.plane.id);
-          pushLog(`已选中 ${clicked.plane.name} 作为新基准面的基准`);
+        // A click rather than a drag. What it means depends on the armed tool:
+        // the hole tool wants a face, everything else offers the plane under the
+        // cursor as the base of a new datum plane.
+        if (!moved) {
+          if (useEditor.getState().activeTool === 'hole') {
+            drillAt(screen);
+            clickPlaneRef.current = null;
+            dragRef.current = { ...EMPTY_DRAG };
+            setMode('idle');
+            dirtyRef.current = true;
+            return;
+          }
+          const clicked = clickPlaneRef.current;
+          if (clicked) {
+            setDatumBase(clicked.plane.id);
+            pushLog(`已选中 ${clicked.plane.name} 作为新基准面的基准`);
+          }
         }
         clickPlaneRef.current = null;
         dragRef.current = { ...EMPTY_DRAG };
@@ -667,7 +744,7 @@ export default function CanvasView(): React.ReactElement {
 
       dragRef.current = { ...EMPTY_DRAG };
     },
-    [doc, localScreen, pushLog, select, setDatumBase, setMode, toWorld, transformSelection],
+    [doc, localScreen, pushLog, select, setDatumBase, setMode, toWorld, transformSelection, drillAt],
   );
 
   const onWheel = useCallback(
@@ -725,7 +802,7 @@ export default function CanvasView(): React.ReactElement {
     ev.preventDefault();
 
     const state = useEditor.getState();
-    const entity = state.doc.entities.find((e) => e.id === entityId);
+    const entity = findEntity(state.doc, entityId);
     if (!entity) return;
     const field = propField(entity, state.doc, fieldKey);
     if (!field || typeof field.value !== 'number') return;
@@ -757,7 +834,7 @@ export default function CanvasView(): React.ReactElement {
       return;
     }
     const state = useEditor.getState();
-    const entity = state.doc.entities.find((e) => e.id === draft.entity);
+    const entity = findEntity(state.doc, draft.entity);
     const field = entity ? propField(entity, state.doc, draft.fieldKey) : undefined;
     const dim = field?.dimension;
     if (!field || !dim || !field.applyTo) return;
@@ -778,59 +855,82 @@ export default function CanvasView(): React.ReactElement {
     if (!ready) return;
     let running = true;
 
-    /**
-     * Mesh cache, keyed by solid.
-     *
-     * A solid's triangles depend on exactly three things: the sketch it points
-     * at, its height, and the plane that sketch sits on. All three are held **by
-     * reference** — a document edit replaces the entity, and a plane edit
-     * replaces the plane — so identity checks notice every change and no
-     * per-frame `JSON.stringify` ever has to run.
-     */
-    const meshCache = new Map<
-      string,
-      { src: Entity | undefined; height: number; plane: DocPlane | undefined; verts: Float32Array }
-    >();
+    // 帧计数器。以前这里用的是 `rafRef.current % 30` —— 那是 rAF 的**句柄**
+    // 不是帧号，命中全凭 id 碰巧是 30 的倍数，所以比例尺更新毫无规律可言
+    // （有时连着几帧都命中，有时几秒不更新）。
+    let frames = 0;
 
-    /** Build (or reuse) each solid's triangles and hand them to the 3D pass. */
-    const drawSolids = (
+    /** 连续抛帧的次数，用来节流报错（一帧炸一次刷屏谁也看不清）。 */
+    let frameErrors = 0;
+
+    /**
+     * 按需重绘的总闸。
+     *
+     * 以前 `dirtyRef` 到处被置 true，却**没有任何地方读它** —— 帧循环无条件
+     * 全画：每帧清屏 + 重新镶嵌整幅图 + 重建顶点批次，哪怕鼠标一动不动。
+     * 在核显上这就是每秒 60 次的全屏重绘，画面被反复清空重画，表现出来就是
+     * 持续的闪烁与掉帧；顺带还白烧 GPU。
+     *
+     * 现在 true 的来源只有三处：store 里任何一个字段变化（下面 subscribe）、
+     * 指针/滚轮/拖拽等交互（各事件里的 `dirtyRef.current = true`）、以及工具
+     * 每 16 ms 换新的预览对象（在 `frame` 里比引用）。静止时一帧都不画。
+     */
+    const unsubscribe = useEditor.subscribe(() => {
+      dirtyRef.current = true;
+    });
+
+    /** 上一帧画过的工具预览 / 锚点。工具每次 move 都会换一个新对象。 */
+    let lastPreview: unknown = undefined;
+    let lastAnchor: unknown = undefined;
+
+    /**
+     * 栅格缓存。栅格是单帧里最贵的一块（几千条线的生成 + 打包 + 上传），而它
+     * 只随视图与栅格设置变化 —— 平移缩放之外一帧都不必重算。
+     * 这里缓存的是 buildGrid 的**输出**，不是上传后的 GPU 数据（批次每帧重建）。
+     */
+    let gridCacheKey = '';
+    let gridCacheLines: ReturnType<typeof buildGrid> = [];
+
+    /**
+     * 镶嵌缓存，键是「文档引用 + 缩放」。文档用引用判，因为每次编辑 store 都写
+     * 一个新对象；缩放进键是因为镶嵌容差按屏幕像素给，缩放变了弦长就变了。
+     */
+    let tessCache: { vertices: Float32Array; strips: Uint32Array } | null = null;
+    let tessKeyDoc: unknown = null;
+    let tessKeyScale = 0;
+    let tessKeyKernel = false;
+
+    /**
+     * Hand the evaluated feature meshes to the 3D pass.
+     *
+     * No mesh cache here on purpose (work package 1.2): the evaluator runs
+     * once per **real command** in the store, and `state.featureEval` is a
+     * stable object between those changes — the render loop forwards what it
+     * was given and recomputes nothing. The cache this replaces keyed on
+     * `entry.src !== src` (entity identity), which the patch layer defeats by
+     * cloning entities on every apply: the reference always differs, so the
+     * key was really "every edit", and an undo that restored identical
+     * geometry still rebuilt every mesh. The evaluator's result identity is
+     * the honest key — a new result means new meshes, full stop.
+     */
+    const drawFeatures = (
       renderer: GlRenderer,
       state: ReturnType<typeof useEditor.getState>,
     ): void => {
-      const { doc, orbit, view } = state;
+      const { doc, orbit, view, featureEval, selectedFeature } = state;
       const items: Array<{ verts: Float32Array; color: [number, number, number] }> = [];
-      const live = new Set<string>();
-      for (const solid of doc.solids) {
-        live.add(solid.id);
-        const src = doc.entities.find((e) => e.id === solid.source);
-        // The solid inherits its plane from the sketch, so there is nothing to
-        // store on the solid itself — move the sketch to another plane and the
-        // solid moves with it.
-        const plane = src ? findPlane(doc, planeOf(src)) : undefined;
-        let entry = meshCache.get(solid.id);
-        if (
-          !entry ||
-          entry.src !== src ||
-          entry.height !== solid.height ||
-          entry.plane !== plane
-        ) {
-          const verts =
-            src && plane ? extrudeMesh(src, solid.height, planeFrame(plane)) : null;
-          entry = {
-            src,
-            height: solid.height,
-            plane,
-            verts: verts ?? new Float32Array(0),
-          };
-          meshCache.set(solid.id, entry);
-        }
-        if (!src || entry.verts.length === 0) continue;
-        const layer = doc.layers.find((l) => l.id === solid.layer);
-        const [r, g, b] = hexToRgba(layer?.color ?? '#c9ced8', 1);
-        items.push({ verts: entry.verts, color: [r, g, b] });
+      for (const ev of featureEval.items) {
+        // Suppressed and error items carry no geometry. The error is on the
+        // status chip and in the log (work package 1.2's "errors are
+        // values"), not silently absent from the canvas.
+        if (ev.status !== 'ok' || ev.verts.length === 0) continue;
+        const layer = doc.layers.find((l) => l.id === ev.feature.layer);
+        // Selected in the feature tree → the 2D selection's amber, so "this is
+        // the one I picked" reads the same in both views.
+        const hex = ev.feature.id === selectedFeature ? UI_COLORS.selected : (layer?.color ?? '#c9ced8');
+        const [r, g, b] = hexToRgba(hex, 1);
+        items.push({ verts: ev.verts, color: [r, g, b] });
       }
-      // Forget solids that were deleted, so a long session cannot leak meshes.
-      for (const id of [...meshCache.keys()]) if (!live.has(id)) meshCache.delete(id);
 
       renderer.drawMeshes(items, viewProj(orbit, view.width / Math.max(1, view.height)));
     };
@@ -1022,7 +1122,7 @@ export default function CanvasView(): React.ReactElement {
       if (state.view3d) {
         drawGrid3d(renderer, state);
         drawDatums(renderer, state);
-        drawSolids(renderer, state);
+        drawFeatures(renderer, state);
         const cur = cursor3dRef.current;
         if (cur) drawCursor3d(renderer, state, cur);
         return;
@@ -1043,25 +1143,35 @@ export default function CanvasView(): React.ReactElement {
       const viewArr: Mat = clipMatrixOf(v);
 
       // ---- grid ----
-      const gridLines = buildGrid(
-        {
-          visibleBounds: () => ({
-            minX: v.center.x - (v.width / 2) * v.scale,
-            minY: v.center.y - (v.height / 2) * v.scale,
-            maxX: v.center.x + (v.width / 2) * v.scale,
-            maxY: v.center.y + (v.height / 2) * v.scale,
-          }),
-        } as unknown as Parameters<typeof buildGrid>[0],
-        {
-          visible: state.gridVisible,
-          spacing: d.settings.gridSpacing,
-          subdivisions: d.settings.gridSubdivisions,
-          majorColor: '#2c313a',
-          minorColor: '#1e2228',
-          axisXColor: '#5a3a3a',
-          axisYColor: '#3a5a3a',
-        },
-      );
+      //
+      // 栅格只依赖「视图框 + 栅格设置」这两样，与图元、光标、选择都无关。以前
+      // 它每帧重算：几千条线的 CPU 生成 + 打包 + 上传，是单帧里最贵的一块，而
+      // 绝大多数帧它的输入一点没变。现在按 key 缓存，只有平移 / 缩放 / 改栅格
+      // 设置时才真的重算。
+      const gridKey = `${v.center.x}|${v.center.y}|${v.scale}|${v.width}|${v.height}|${state.gridVisible ? 1 : 0}|${d.settings.gridSpacing}|${d.settings.gridSubdivisions}`;
+      if (gridKey !== gridCacheKey) {
+        gridCacheKey = gridKey;
+        gridCacheLines = buildGrid(
+          {
+            visibleBounds: () => ({
+              minX: v.center.x - (v.width / 2) * v.scale,
+              minY: v.center.y - (v.height / 2) * v.scale,
+              maxX: v.center.x + (v.width / 2) * v.scale,
+              maxY: v.center.y + (v.height / 2) * v.scale,
+            }),
+          } as unknown as Parameters<typeof buildGrid>[0],
+          {
+            visible: state.gridVisible,
+            spacing: d.settings.gridSpacing,
+            subdivisions: d.settings.gridSubdivisions,
+            majorColor: '#2c313a',
+            minorColor: '#1e2228',
+            axisXColor: '#5a3a3a',
+            axisYColor: '#3a5a3a',
+          },
+        );
+      }
+      const gridLines = gridCacheLines;
 
       if (gridLines.length > 0) {
         const gp: Float32Array = new Float32Array(gridLines.length * 4);
@@ -1098,11 +1208,30 @@ export default function CanvasView(): React.ReactElement {
       // has no position in this 2D view at all — drawing it would put its `(u, v)`
       // on top of unrelated coordinates, so switching planes is a clean slate
       // rather than an overlay of things that are not really there.
-      const visible = d.entities.filter(
-        (e) => isVisible(d, e) && planeOf(e) === d.activePlane,
-      );
-      const scene = packScene(visible, (e) => isSnappable(d, e));
-      const tess = visible.length > 0 ? sb.run(scene) : { vertices: new Float32Array(0), strips: new Uint32Array(0) };
+      const visible = sketchEntities(d).filter((e) => isVisible(d, e));
+
+      // 镶嵌 + 场景打包只在「文档变了」或「缩放变了」时重做。
+      //
+      // 平移、hover、改选择、拖着标注走都不改变几何，却原来每帧都让内核把整幅
+      // 图重新镶嵌一遍（一次跨 FFI 的大数组往返 + 一次新数组分配）。文档对象在
+      // store 里每次编辑都是**新引用**（所有写入点都是 `doc: { ...doc }`），所以
+      // 拿引用当 key 不会漏判；漏判的后果是画面不更新，比多算一次严重得多。
+      let tess: { vertices: Float32Array; strips: Uint32Array };
+      if (tessCache && tessKeyDoc === d && tessKeyScale === v.scale && tessKeyKernel === state.kernelReady) {
+        tess = tessCache;
+      } else {
+        const scene = packScene(visible, (e) => isSnappable(d, e));
+        tess =
+          visible.length > 0
+            ? sb.run(scene)
+            : { vertices: new Float32Array(0), strips: new Uint32Array(0) };
+        tessCache = tess;
+        tessKeyDoc = d;
+        tessKeyScale = v.scale;
+        // 内核就绪前后走的是两条镶嵌路径（TS 回退 vs WASM）。键里不带这个标志，
+        // 首帧（内核未就绪）缓存下来的回退结果就会一直用到关掉页面为止。
+        tessKeyKernel = state.kernelReady;
+      }
 
       const styles: Array<RenderStyle | null> = visible.map((e: Entity) => {
         const st = state.selection.has(e.id);
@@ -1132,7 +1261,7 @@ export default function CanvasView(): React.ReactElement {
       }
 
       // Selection grips.
-      for (const e of d.entities) {
+      for (const e of sketchEntities(d)) {
         if (!state.selection.has(e.id)) continue;
         for (const p of gripPoints(e)) {
           overlayPoints.push(...snapMarker(p, 'endpoint', markerPx));
@@ -1257,13 +1386,46 @@ export default function CanvasView(): React.ReactElement {
         renderer.drawPoints(overlayPoints, viewArr);
       }
 
-      // Scale bar.
-      if (rafRef.current % 30 === 0) {
-        const major = adaptiveGridSpacing(d.settings.gridSpacing, v.scale);
-        setScaleBar(`栅格 ${major.toPrecision(3)} ${d.settings.units}`);
-      }
-
       dirtyRef.current = false;
+    };
+
+    /**
+     * 画一帧，含错误兜底。抽成函数是因为有**两个**调用者：渲染循环，以及「尺寸
+     * 刚变」时的补画（`drawNowRef`）——后者必须在同一个任务里补上，见那里。
+     */
+    const drawOnce = (renderer: GlRenderer, sb: SceneBuffer): void => {
+      try {
+        drawFrame(renderer, sb);
+        frameErrors = 0;
+      } catch (err) {
+        // Geometry problems must not take the whole viewport down. Report once
+        // per session and keep animating (the next frame usually recovers).
+        //
+        // 但「只报一次」正是闪烁最难查的地方：一帧画崩了 = 一次清屏后的空白
+        // 闪，之后每次都静默吞掉，控制台只有孤零零一条。所以改成计数节流：
+        // 时不时再报一次，好让人看见「它一直在炸」而不是「它炸过一次」。
+        frameErrors++;
+        if (frameErrors === 1 || frameErrors % 60 === 0) {
+          console.error(`uniCAD: 渲染帧异常（第 ${frameErrors} 次）`, err);
+        }
+        // 这一帧没画成，保持脏：下一帧重试，画面不会停在被清空的那一版。
+        dirtyRef.current = true;
+      }
+    };
+
+    /**
+     * 「立刻画一帧」，给 sizing effect 用。
+     *
+     * 尺寸变化 → `canvas.width/height` 被重新赋值 → 绘图缓冲被重建并清空。等下一个
+     * rAF 再画，中间就有一帧是空的（60Hz 下最长 16ms），肉眼就是一次闪烁。这里同步
+     * 补画，清屏与重画落在同一个任务里，合成器只会看到画好的那一版。
+     */
+    drawNowRef.current = (): void => {
+      const renderer = rendererRef.current;
+      const sb = sceneBufferRef.current;
+      if (!running || !renderer || !sb) return;
+      dirtyRef.current = true;
+      drawOnce(renderer, sb);
     };
 
     const frame = (): void => {
@@ -1275,15 +1437,30 @@ export default function CanvasView(): React.ReactElement {
       const sb = sceneBufferRef.current;
       if (!renderer || !sb) return;
 
-      try {
-        drawFrame(renderer, sb);
-      } catch (err) {
-        // Geometry problems must not take the whole viewport down. Report once
-        // per session and keep animating (the next frame usually recovers).
-        if (!frameErrorRef.current) {
-          frameErrorRef.current = true;
-          console.error('uniCAD: 渲染帧异常', err);
-        }
+      // 工具预览与锚点是挂在 window 上的（工具 → 画布的旁路通道），不进 store，
+      // 所以订阅看不见它们 —— 只能比引用。变了就该重画。
+      const w = window as unknown as { __unicadPreview?: unknown; __unicadToolAnchor?: unknown };
+      const preview = w.__unicadPreview;
+      const anchor = w.__unicadToolAnchor;
+      if (preview !== lastPreview || anchor !== lastAnchor) {
+        lastPreview = preview;
+        lastAnchor = anchor;
+        dirtyRef.current = true;
+      }
+
+      // 没脏就跳过整帧：既不上传顶点，也不动 DOM 标注层。这是「静止画面不闪」
+      // 的那一半；另一半是下面出错不再静默吞掉。
+      if (!dirtyRef.current) return;
+
+      drawOnce(renderer, sb);
+
+      // 比例尺：每 30 帧算一次，值没变时 setState 会被 React 直接跳过（同值
+      // bail out），不会多一次重渲染。
+      frames++;
+      if (frames % 30 === 0) {
+        const st = useEditor.getState();
+        const major = adaptiveGridSpacing(st.doc.settings.gridSpacing, st.view.scale);
+        setScaleBar(`栅格 ${major.toPrecision(3)} ${st.doc.settings.units}`);
       }
     };
 
@@ -1291,6 +1468,10 @@ export default function CanvasView(): React.ReactElement {
     return () => {
       running = false;
       cancelAnimationFrame(rafRef.current);
+      unsubscribe();
+      // 循环拆了，补画入口必须一起撤：留着它就会往一个已经没人维护的
+      // renderer/场景缓冲上画。
+      drawNowRef.current = null;
     };
   }, [ready, toWorld]);
 
@@ -1336,9 +1517,9 @@ export default function CanvasView(): React.ReactElement {
             <div className="pie-backdrop" onPointerDown={() => setPie(null)} />
             <PieMenu
               at={{ x: pie.x, y: pie.y }}
-              sectors={buildPieMenu({
+              sectors={              buildPieMenu({
                 doc,
-                selected: doc.entities.filter((e) => selection.has(e.id)),
+                selected: sketchEntities(doc).filter((e) => selection.has(e.id)),
                 activeTool,
                 view3d,
                 report: constraintReport,

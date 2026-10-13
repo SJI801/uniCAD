@@ -28,6 +28,7 @@ await initKernel();
 const { useEditor } = await import('./src/state/editorStore');
 
 import type { Entity, LineEntity, CircleEntity } from './src/core/types';
+import { findEntity, sketchEntities } from './src/core/doc';
 
 const S = () => useEditor.getState();
 
@@ -62,7 +63,7 @@ const circle = (id: string, x: number, y: number, r: number, layer: string): Cir
 function install(entities: Entity[]): void {
   S().replaceDocument({ ...S().doc, entities, constraints: [], solids: [] });
 }
-const ent = (id: string): Entity => S().doc.entities.find((e) => e.id === id)!;
+const ent = (id: string): Entity => findEntity(S().doc, id)!;
 const constraintOfKind = (kind: string) => S().doc.constraints.find((c) => c.kind === kind);
 
 /** 点到支撑直线的垂距（本探针里切线都是竖直线，直接取 |x| 也行，但仍按通用式算）。 */
@@ -217,7 +218,7 @@ describe('0.2 画布标注就地改值（双击标注走的那条路）', () => 
   /** 与 CanvasView.onDimDoubleClick 同形的查表：标注 → 参数行。 */
   const fieldOf = async (entityId: string, fieldKey: string) => {
     const { propField } = await import('./src/core/props');
-    const e = S().doc.entities.find((x) => x.id === entityId)!;
+    const e = findEntity(S().doc, entityId)!;
     return propField(e, S().doc, fieldKey);
   };
 
@@ -256,7 +257,7 @@ describe('0.2 画布标注就地改值（双击标注走的那条路）', () => 
       pl,
     ]);
     const ids = new Set(['l', 'c', 'el', 'p']);
-    const { labels } = selectedDimensions(S().doc.entities, ids, ctx);
+    const { labels } = selectedDimensions(sketchEntities(S().doc), ids, ctx);
     const editOf = (id: string) => labels.find((x) => x.edit?.entity === id)?.edit;
 
     expect(editOf('l')).toEqual({ entity: 'l', fieldKey: 'length' });
@@ -277,7 +278,7 @@ describe('0.2 画布标注就地改值（双击标注走的那条路）', () => 
     S().select(['c']);
 
     // ① 画布上那条标注
-    const { labels } = selectedDimensions(S().doc.entities, S().selection, ctx);
+    const { labels } = selectedDimensions(sketchEntities(S().doc), S().selection, ctx);
     const edit = labels.find((x) => x.edit)!.edit!;
     expect(edit).toEqual({ entity: 'c', fieldKey: 'radius' });
 

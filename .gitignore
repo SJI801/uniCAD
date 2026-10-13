@@ -19,3 +19,6 @@ dims-live.png
 dims-selected.png
 props-panel.png
 canvas-dash-zoom.png
+
+# TypeScript 增量编译信息（构建产物，不该进库）
+*.tsbuildinfo

@@ -5,24 +5,24 @@
    ========================================================================== */
 
 :root {
-  --bg-deep: #0f1115;
-  --bg-panel: #171a20;
-  --bg-panel-alt: #1c2027;
-  --bg-elevated: #22262e;
-  --bg-input: #101318;
-  --bg-hover: #262b34;
-  --canvas-bg: #14161a;
+  --bg-deep: #0c0e12;
+  --bg-panel: #13161b;
+  --bg-panel-alt: #191d24;
+  --bg-elevated: #1f242c;
+  --bg-input: #0f1216;
+  --bg-hover: #232933;
+  --canvas-bg: #121418;
 
-  --border: #2a2f38;
-  --border-strong: #3a4150;
+  --border: #262c36;
+  --border-strong: #39414f;
 
-  --text: #d7dce4;
+  --text: #d9dee6;
   --text-dim: #8b93a1;
   --text-faint: #5c6472;
 
   --accent: #4ea3ff;
   --accent-dim: #2b6fb8;
-  --accent-soft: rgba(78, 163, 255, 0.14);
+  --accent-soft: rgba(78, 163, 255, 0.13);
   --ok: #3fd07a;
   --warn: #ffb020;
   --danger: #ff5d5d;
@@ -31,8 +31,19 @@
   --mono: 'JetBrains Mono', 'Cascadia Code', 'SF Mono', Menlo, Consolas, 'DejaVu Sans Mono', monospace;
   --sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans SC', sans-serif;
 
-  --radius: 5px;
-  --radius-sm: 3px;
+  --radius: 6px;
+  --radius-sm: 4px;
+  --radius-lg: 10px;
+
+  /* 高光：面板/卡片顶边的一条 1px 内亮线，是"提起来"的关键 */
+  --hl: inset 0 1px 0 rgba(255, 255, 255, 0.035);
+  /* 阴影阶 */
+  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.3);
+  --shadow-2: 0 3px 10px rgba(0, 0, 0, 0.28), 0 1px 3px rgba(0, 0, 0, 0.22);
+  --shadow-pop: 0 14px 36px rgba(0, 0, 0, 0.45), 0 4px 10px rgba(0, 0, 0, 0.3);
+  --focus-ring: 0 0 0 3px rgba(78, 163, 255, 0.22);
+
+  --ease: cubic-bezier(0.2, 0.7, 0.3, 1);
 
   --header-h: 42px;
   --ribbon-h: 62px;
@@ -45,16 +56,16 @@
 
 @media (prefers-color-scheme: light) {
   :root {
-    --bg-deep: #eceef1;
+    --bg-deep: #eef0f3;
     --bg-panel: #f7f8fa;
     --bg-panel-alt: #ffffff;
     --bg-elevated: #ffffff;
     --bg-input: #ffffff;
-    --bg-hover: #e8ebef;
+    --bg-hover: #eaeef2;
     --canvas-bg: #f2f3f5;
 
-    --border: #d5d9e0;
-    --border-strong: #b9c0cb;
+    --border: #dde1e7;
+    --border-strong: #c3cad4;
 
     --text: #1e2329;
     --text-dim: #5a626e;
@@ -62,11 +73,17 @@
 
     --accent: #1a73e8;
     --accent-dim: #1558b0;
-    --accent-soft: rgba(26, 115, 232, 0.12);
+    --accent-soft: rgba(26, 115, 232, 0.1);
     --ok: #1e9e57;
     --warn: #b8730a;
     --danger: #d33636;
     --snap: #159a55;
+
+    --hl: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+    --shadow-1: 0 1px 2px rgba(16, 24, 40, 0.06);
+    --shadow-2: 0 3px 10px rgba(16, 24, 40, 0.08), 0 1px 3px rgba(16, 24, 40, 0.05);
+    --shadow-pop: 0 14px 36px rgba(16, 24, 40, 0.16), 0 4px 10px rgba(16, 24, 40, 0.08);
+    --focus-ring: 0 0 0 3px rgba(26, 115, 232, 0.18);
 
     color-scheme: light;
   }
@@ -92,6 +109,16 @@ body {
   line-height: 1.45;
   overflow: hidden;
   -webkit-font-smoothing: antialiased;
+}
+
+/* 统一键盘焦点环：鼠标点击不出环，Tab 导航才出 */
+:focus-visible {
+  outline: none;
+  box-shadow: var(--focus-ring);
+}
+
+::selection {
+  background: var(--accent-soft);
 }
 
 .mono {
@@ -129,6 +156,9 @@ body {
   padding: 0 14px;
   background: linear-gradient(180deg, var(--bg-elevated), var(--bg-panel));
   border-bottom: 1px solid var(--border);
+  box-shadow: var(--hl);
+  position: relative;
+  z-index: 2;
 }
 
 .brand {
@@ -141,17 +171,23 @@ body {
   color: var(--accent);
   font-size: 16px;
   line-height: 1;
+  filter: drop-shadow(0 0 6px var(--accent-soft));
 }
 
 .brand-name {
-  font-weight: 650;
-  letter-spacing: 0.02em;
+  font-weight: 700;
+  letter-spacing: 0.03em;
   font-size: 14px;
+  background: linear-gradient(100deg, var(--text) 40%, var(--accent));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
 }
 
 .brand-sub {
   color: var(--text-faint);
   font-size: 11px;
+  letter-spacing: 0.01em;
 }
 
 .header-meta {
@@ -160,12 +196,13 @@ body {
 }
 
 .header-chip {
-  padding: 2px 9px;
+  padding: 2px 10px;
   border: 1px solid var(--border);
   border-radius: 999px;
   font-size: 11px;
   font-family: var(--mono);
   background: var(--bg-panel-alt);
+  box-shadow: var(--shadow-1);
 }
 
 /* ==========================================================================
@@ -200,9 +237,10 @@ body {
   gap: 1px;
   padding: 3px 5px 1px;
   flex: 0 0 auto;
-  background: var(--bg-panel-alt);
+  background: linear-gradient(180deg, var(--bg-panel-alt), color-mix(in srgb, var(--bg-panel-alt) 88%, var(--bg-deep)));
   border: 1px solid var(--border);
-  border-radius: 7px;
+  border-radius: 8px;
+  box-shadow: var(--hl), var(--shadow-1);
 }
 
 .ribbon-group.grow {
@@ -340,14 +378,26 @@ body {
   position: fixed;
   z-index: 60;
   min-width: 178px;
-  padding: 4px;
+  padding: 5px;
   display: flex;
   flex-direction: column;
   gap: 1px;
   background: var(--bg-elevated);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+  box-shadow: var(--shadow-pop);
+  animation: menu-in 110ms var(--ease);
+}
+
+@keyframes menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(-3px) scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .ribbon-menu-item {
@@ -355,7 +405,7 @@ body {
   align-items: baseline;
   justify-content: space-between;
   gap: 14px;
-  padding: 5px 8px;
+  padding: 5px 9px;
   background: transparent;
   border: 1px solid transparent;
   border-radius: var(--radius-sm);
@@ -364,6 +414,7 @@ body {
   font-family: var(--sans);
   font-size: 12px;
   text-align: left;
+  transition: background 80ms var(--ease);
 }
 
 .ribbon-menu-item:hover:not(:disabled) {
@@ -450,7 +501,7 @@ body {
   font-size: 10.5px;
   line-height: 1.15;
   white-space: nowrap;
-  transition: background 90ms ease, border-color 90ms ease, color 90ms ease;
+  transition: background 100ms var(--ease), border-color 100ms var(--ease), color 100ms var(--ease);
 }
 
 .tool-btn:hover:not(:disabled) {
@@ -458,10 +509,15 @@ body {
   border-color: var(--border);
 }
 
+.tool-btn:active:not(:disabled) {
+  background: color-mix(in srgb, var(--bg-hover) 70%, var(--bg-deep));
+}
+
 .tool-btn.active {
-  background: var(--accent-soft);
+  background: linear-gradient(180deg, var(--accent-soft), color-mix(in srgb, var(--accent-soft) 55%, transparent));
   border-color: var(--accent-dim);
   color: var(--accent);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 0 10px var(--accent-soft);
 }
 
 .tool-btn:disabled {
@@ -527,18 +583,24 @@ body {
 }
 
 .mini-btn {
-  padding: 3px 9px;
+  padding: 3px 10px;
   background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   color: var(--text);
   cursor: pointer;
   font-size: 11px;
+  box-shadow: var(--shadow-1);
+  transition: background 100ms var(--ease), border-color 100ms var(--ease);
 }
 
 .mini-btn:hover {
   background: var(--bg-hover);
   border-color: var(--border-strong);
+}
+
+.mini-btn:active {
+  box-shadow: none;
 }
 
 .icon-btn {
@@ -584,6 +646,9 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  box-shadow: var(--hl);
+  position: relative;
+  z-index: 1;
 }
 
 .side-panel.left {
@@ -614,6 +679,9 @@ body {
   background: var(--canvas-bg);
   overflow: hidden;
   touch-action: none;
+  /* 把画布区的绘制封在自己的盒子内：外面任何东西重绘都不会顺带重画这一块，
+     这一块重绘也不会冒出去（每帧都在重画的正是它）。 */
+  contain: paint;
 }
 
 .canvas-gl {
@@ -644,25 +712,29 @@ body {
   left: 0;
   /* 位置由 JS 每帧写 --dx / --dy，居中偏移留在样式表里。 */
   transform: translate(-50%, -50%) translate(var(--dx, 0), var(--dy, 0));
-  padding: 1px 7px;
+  padding: 1px 8px;
   border: 1px solid var(--border-strong);
   border-radius: 999px;
-  background: rgba(16, 19, 24, 0.92);
+  background: color-mix(in srgb, var(--bg-input) 88%, transparent);
   color: var(--text);
   font-family: var(--mono);
   font-size: 11px;
   font-variant-numeric: tabular-nums;
   line-height: 1.5;
   white-space: nowrap;
+  box-shadow: var(--shadow-1);
   /* 标注是 chrome，不是可复制的正文；也免得双击进编辑时先把文字选蓝。 */
   user-select: none;
   /* 每帧只动 transform，交给合成层，不触发重排。 */
   will-change: transform;
 }
+/* 注意：这里刻意不加 backdrop-filter —— 标注每帧都在动，核显上每帧重采样
+   背后内容的开销不值得这一点通透感。半透明底 + 阴影足够。 */
 
 @media (prefers-color-scheme: light) {
   .dim-label {
-    background: rgba(255, 255, 255, 0.94);
+    background: rgba(255, 255, 255, 0.92);
+    box-shadow: 0 1px 3px rgba(16, 24, 40, 0.12);
   }
 }
 
@@ -697,13 +769,14 @@ body {
   padding: 1px 7px;
   border: 1px solid var(--accent);
   border-radius: 999px;
-  background: rgba(16, 19, 24, 0.96);
+  background: color-mix(in srgb, var(--bg-input) 94%, transparent);
   color: var(--text);
   font-family: var(--mono);
   font-size: 11px;
   text-align: center;
   outline: none;
   pointer-events: auto;
+  box-shadow: var(--shadow-2), 0 0 0 3px var(--accent-soft);
 }
 
 @media (prefers-color-scheme: light) {
@@ -719,7 +792,7 @@ body {
 .dim-label.constraint {
   padding: 0 5px;
   border-color: var(--accent-dim);
-  background: rgba(16, 19, 24, 0.8);
+  background: color-mix(in srgb, var(--bg-input) 82%, transparent);
   color: var(--accent);
   font-size: 11px;
   cursor: help;
@@ -737,7 +810,7 @@ body {
 .dim-label.dof {
   padding: 0 5px;
   border-color: #2b6f74;
-  background: rgba(16, 19, 24, 0.8);
+  background: color-mix(in srgb, var(--bg-input) 82%, transparent);
   color: #3fd0d8;
   cursor: help;
   pointer-events: auto;
@@ -759,14 +832,23 @@ body {
 }
 
 .hud-item {
-  padding: 2px 8px;
-  background: rgba(0, 0, 0, 0.42);
+  padding: 2px 9px;
+  /* 刻意不用 backdrop-filter：它盖在 WebGL 画布上，会让浏览器把画布内容当
+     背景纹理**每帧重新模糊一次**，核显上既是白烧的开销，也是闪屏的诱因。
+     实底色 + 阴影在视觉上等价，成本却固定在合成阶段。 */
+  background: color-mix(in srgb, var(--bg-input) 88%, transparent);
   border: 1px solid var(--border);
   border-radius: 999px;
   font-family: var(--mono);
   font-size: 10.5px;
   color: var(--text-dim);
-  backdrop-filter: blur(3px);
+  box-shadow: var(--shadow-1);
+}
+
+@media (prefers-color-scheme: light) {
+  .hud-item {
+    background: rgba(255, 255, 255, 0.88);
+  }
 }
 
 .hud-item.warn {
@@ -801,20 +883,25 @@ body {
 
 .panel-tabs {
   display: flex;
+  gap: 4px;
   flex: 0 0 auto;
+  padding: 6px 8px 0;
   border-bottom: 1px solid var(--border);
-  background: var(--bg-panel-alt);
+  background: var(--bg-panel);
 }
 
 .panel-tab {
   flex: 1;
-  padding: 7px 4px;
+  padding: 7px 4px 8px;
   background: transparent;
   border: none;
   border-bottom: 2px solid transparent;
+  border-radius: var(--radius-sm) var(--radius-sm) 0 0;
   color: var(--text-dim);
   cursor: pointer;
   font-size: 11.5px;
+  letter-spacing: 0.02em;
+  transition: color 100ms var(--ease), background 100ms var(--ease);
 }
 
 .panel-tab:hover {
@@ -830,21 +917,44 @@ body {
 .panel-body {
   flex: 1 1 auto;
   overflow-y: auto;
-  padding: 8px;
+  padding: 10px;
 }
 
+/* 分区卡片化：面板内部不再用通栏细线分隔，而是一张张提起来的圆角卡片。
+   滚动容器里的最后一张不留外边距，避免底部出现一段空隙。 */
 .panel-section {
-  padding: 9px 11px 12px;
-  border-bottom: 1px solid var(--border);
+  padding: 10px 12px 12px;
+  background: var(--bg-panel-alt);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--hl), var(--shadow-1);
+  margin-bottom: 10px;
+}
+
+.panel-body > .panel-section:last-child {
+  margin-bottom: 0;
 }
 
 .panel-section h3 {
-  margin: 0 0 7px;
+  margin: 0 0 9px;
   font-size: 11px;
   font-weight: 600;
   text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--text-faint);
+  letter-spacing: 0.07em;
+  color: var(--text-dim);
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+/* 标题左侧的短强调条，让每个分区标题有一个可扫读的锚点 */
+.panel-section h3::before {
+  content: '';
+  width: 3px;
+  height: 11px;
+  border-radius: 2px;
+  background: var(--accent);
+  opacity: 0.85;
 }
 
 .panel-hint {
@@ -877,15 +987,26 @@ body {
   padding: 3px 4px;
   border-bottom: 1px solid var(--border);
   white-space: nowrap;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
 }
 
 .layer-table td {
   padding: 2px 4px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.035);
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 45%, transparent);
+}
+
+.layer-table tbody tr {
+  transition: background 80ms var(--ease);
+}
+
+.layer-table tbody tr:hover {
+  background: var(--bg-hover);
 }
 
 .layer-table tr.current {
   background: var(--accent-soft);
+  box-shadow: inset 2px 0 0 var(--accent);
 }
 
 .layer-table .center {
@@ -911,7 +1032,7 @@ body {
 .cell-input,
 .cell-select {
   width: 100%;
-  padding: 2px 5px;
+  padding: 2px 6px;
   background: var(--bg-input);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -919,12 +1040,14 @@ body {
   font-family: var(--mono);
   font-size: 11px;
   min-width: 0;
+  transition: border-color 100ms var(--ease), box-shadow 100ms var(--ease);
 }
 
 .cell-input:focus,
 .cell-select:focus {
   outline: none;
   border-color: var(--accent);
+  box-shadow: var(--focus-ring);
 }
 
 .color-input {
@@ -945,11 +1068,13 @@ body {
   background: transparent;
   cursor: pointer;
   padding: 0;
+  transition: background 90ms var(--ease), border-color 90ms var(--ease), box-shadow 90ms var(--ease);
 }
 
 .dot-btn.on {
   background: var(--accent);
   border-color: var(--accent);
+  box-shadow: 0 0 6px var(--accent-soft), inset 0 1px 0 rgba(255, 255, 255, 0.3);
 }
 
 .count-btn {
@@ -974,12 +1099,13 @@ body {
 }
 
 .badge {
-  padding: 2px 8px;
+  padding: 2px 9px;
   background: var(--accent-soft);
   border: 1px solid var(--accent-dim);
   border-radius: 999px;
   color: var(--accent);
   font-size: 11px;
+  box-shadow: var(--shadow-1);
 }
 
 .prop-section {
@@ -1142,12 +1268,13 @@ body {
 }
 
 .type-chip {
-  padding: 2px 7px;
+  padding: 2px 8px;
   background: var(--bg-elevated);
   border: 1px solid var(--border);
   border-radius: 999px;
   font-size: 10.5px;
   color: var(--text-dim);
+  box-shadow: var(--shadow-1);
 }
 
 .type-chip b {
@@ -1209,6 +1336,7 @@ body {
   font-family: var(--sans);
   font-size: 11px;
   cursor: pointer;
+  transition: background 90ms var(--ease), color 90ms var(--ease), border-color 90ms var(--ease);
 }
 
 .wide-btn:hover {
@@ -1225,6 +1353,7 @@ body {
   flex: 0 0 auto;
   background: var(--bg-panel);
   border-top: 1px solid var(--border);
+  box-shadow: var(--hl);
 }
 
 .cmd-log {
@@ -1236,6 +1365,13 @@ body {
   color: var(--text-dim);
   background: var(--bg-input);
   border-bottom: 1px solid var(--border);
+  box-shadow: inset 0 2px 4px rgba(0, 0, 0, 0.18);
+}
+
+@media (prefers-color-scheme: light) {
+  .cmd-log {
+    box-shadow: inset 0 2px 4px rgba(16, 24, 40, 0.05);
+  }
 }
 
 .log-line {
@@ -1271,7 +1407,7 @@ body {
 
 .cmd-input {
   flex: 1;
-  padding: 3px 7px;
+  padding: 3px 8px;
   background: var(--bg-input);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -1279,11 +1415,13 @@ body {
   font-family: var(--mono);
   font-size: 11.5px;
   min-width: 0;
+  transition: border-color 100ms var(--ease), box-shadow 100ms var(--ease);
 }
 
 .cmd-input:focus {
   outline: none;
   border-color: var(--accent);
+  box-shadow: var(--focus-ring);
 }
 
 .status-bar {
@@ -1313,10 +1451,10 @@ body {
 }
 
 .status-chip {
-  padding: 2px 7px;
+  padding: 2px 8px;
   background: var(--bg-panel-alt);
   border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
+  border-radius: 999px;
   color: var(--text-dim);
   font-size: 10.5px;
   cursor: default;
@@ -1324,6 +1462,7 @@ body {
   align-items: center;
   gap: 4px;
   flex: 0 0 auto;
+  transition: background 90ms var(--ease), color 90ms var(--ease), border-color 90ms var(--ease);
 }
 
 button.status-chip {
@@ -1333,6 +1472,11 @@ button.status-chip {
 button.status-chip:hover {
   background: var(--bg-hover);
   color: var(--text);
+  border-color: var(--border-strong);
+}
+
+button.status-chip:active {
+  background: color-mix(in srgb, var(--bg-hover) 70%, var(--bg-deep));
 }
 
 .status-chip.mono {
@@ -1392,6 +1536,7 @@ button.status-chip:hover {
   --pie-off: rgba(255, 255, 255, 0.28);
   /* 长标签宁可溢出也不要被 viewBox 切掉——「显示不完整」正是要修的那件事。 */
   overflow: visible;
+  filter: drop-shadow(0 10px 28px rgba(0, 0, 0, 0.4)) drop-shadow(0 2px 6px rgba(0, 0, 0, 0.3));
 }
 
 @media (prefers-color-scheme: light) {
@@ -1488,8 +1633,8 @@ button.status-chip:hover {
    ========================================================================== */
 
 ::-webkit-scrollbar {
-  width: 9px;
-  height: 9px;
+  width: 10px;
+  height: 10px;
 }
 
 ::-webkit-scrollbar-track {
@@ -1497,15 +1642,21 @@ button.status-chip:hover {
 }
 
 ::-webkit-scrollbar-thumb {
-  background: var(--border-strong);
-  border-radius: 5px;
+  background: color-mix(in srgb, var(--border-strong) 70%, transparent);
+  border-radius: 999px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+  transition: background 100ms ease;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: color-mix(in srgb, var(--text-faint) 80%, transparent);
   border: 2px solid transparent;
   background-clip: content-box;
 }
 
-::-webkit-scrollbar-thumb:hover {
-  background: var(--text-faint);
-  background-clip: content-box;
+::-webkit-scrollbar-corner {
+  background: transparent;
 }
 
 /* ==========================================================================
@@ -1578,6 +1729,7 @@ button.status-chip:hover {
   font-family: var(--mono);
   font-size: 11px;
   cursor: pointer;
+  transition: color 90ms var(--ease), border-color 90ms var(--ease), background 90ms var(--ease);
 }
 
 .chip:hover {
@@ -1616,4 +1768,154 @@ button.status-chip:hover {
 .wide-btn:disabled {
   opacity: 0.45;
   cursor: default;
+}
+
+/* ==========================================================================
+   特征树（阶段 1 · 1.4）
+
+   一行 = 一个节点。三种状态各有自己的视觉语言，且互不抢占：
+   活动草图 = 强调色底（新图元的目的地）；选中特征 = 与 3D 高亮同色描边；
+   抑制 = 整行退到-faint；求值失败 = 红点 + 名字变红。
+   ========================================================================== */
+
+.tree-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tree-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 4px 3px 6px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-sm);
+  color: var(--text);
+  font-size: 12px;
+  /* A row can carry up to four numbers (a pattern's two counts and two
+     spacings). The name keeps a floor so it never disappears, and the numbers
+     wrap under it rather than being squeezed to nothing. */
+  flex-wrap: wrap;
+  transition: background 90ms var(--ease), border-color 90ms var(--ease);
+}
+
+.tree-row:hover {
+  background: var(--bg-hover);
+}
+
+/* 活动草图：新图元的目的地，值得一整块底色 */
+.tree-row.active {
+  background: var(--accent-soft);
+  border-color: var(--accent-dim);
+}
+
+/* 选中的特征：与 3D 的选中色同一个值，跨视图读作同一件事 */
+.tree-row.selected {
+  border-color: var(--warn);
+}
+
+/* 抑制：跳过求值、网格消失——行也退到背景里 */
+.tree-row.off {
+  color: var(--text-faint);
+}
+
+.tree-row.bad .tree-name {
+  color: var(--danger);
+}
+
+.tree-icon {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  font-size: 11px;
+}
+
+.tree-row.active .tree-icon {
+  color: var(--accent);
+}
+
+.tree-name {
+  flex: 1 1 auto;
+  min-width: 56px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.tree-meta {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  font-size: 10.5px;
+  cursor: default;
+}
+
+.tree-dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--danger);
+  box-shadow: 0 0 0 2px rgba(255, 93, 93, 0.16);
+}
+
+.tree-tag {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.tree-act {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-faint);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  transition: color 90ms var(--ease), background 90ms var(--ease);
+}
+
+.tree-act:hover {
+  color: var(--text);
+  background: var(--bg-elevated);
+}
+
+.tree-act.danger:hover {
+  color: var(--danger);
+}
+
+/* 行内输入（改名 / 改高度）顶掉名字的位置，宽度跟着行 */
+.tree-row .cell-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* 布尔的运算选择：既是这一行的参数，也是它的身份 */
+.tree-select {
+  flex: 0 0 auto;
+  padding: 0 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-dim);
+  font-family: var(--sans);
+  font-size: 10.5px;
+  cursor: pointer;
+}
+
+.tree-select:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
 }

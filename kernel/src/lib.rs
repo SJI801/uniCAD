@@ -11,9 +11,12 @@
 //! - [`snap`]        — object snap candidate generation
 //! - [`trim`]        — cutting a target back to its cutting edges
 //! - [`split`]       — breaking primitives apart at their intersection points
+//! - [`mesh`]        — extrude / revolve: a closed loop into flat-shaded triangles
+//! - [`boolean`]     — mesh boolean (difference) over those meshes
 //! - [`constraints`] — parametric constraint solving
 //! - [`ffi`]         — the `#[wasm_bindgen]` surface consumed by the front-end
 
+pub mod boolean;
 pub mod constraints;
 pub mod ffi;
 pub mod geom;

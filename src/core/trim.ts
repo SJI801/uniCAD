@@ -25,6 +25,7 @@
 import type { CadDocument, Entity, EntityId, Vec2 } from './types';
 import { makeArc, makeEllipse, makeLine, makePolyline } from './entities';
 import { command, addEntity, danglingConstraints, removeEntity, type Command } from './history';
+import { activeSketch, findEntity, sketchOfEntity } from './doc';
 import { kernelOrNull, packScene, type PackedScene } from './kernel';
 
 /** Mirrors `TRIM_*` in `kernel/src/ffi.rs`. */
@@ -88,12 +89,12 @@ export function trimEntity(
   if (!kernel || typeof kernel.trim_target !== 'function') {
     return { ok: false, reason: 'noKernel' };
   }
-  const target = doc.entities.find((e) => e.id === targetId);
+  const target = findEntity(doc, targetId);
   if (!target) return { ok: false, reason: 'offTarget' };
 
   const cutters = cuttingIds
     .filter((id) => id !== targetId)
-    .map((id) => doc.entities.find((e) => e.id === id))
+    .map((id) => findEntity(doc, id))
     .filter((e): e is Entity => e !== undefined);
   if (cutters.length === 0) return { ok: false, reason: 'noCuts' };
 
@@ -136,11 +137,11 @@ export function trimPreview(
 ): Array<{ x: number; y: number }> {
   const kernel = kernelOrNull();
   if (!kernel || typeof kernel.trim_preview !== 'function') return [];
-  const target = doc.entities.find((e) => e.id === targetId);
+  const target = findEntity(doc, targetId);
   if (!target) return [];
   const cutters = cuttingIds
     .filter((id) => id !== targetId)
-    .map((id) => doc.entities.find((e) => e.id === id))
+    .map((id) => findEntity(doc, id))
     .filter((e): e is Entity => e !== undefined);
   if (cutters.length === 0) return [];
 
@@ -311,14 +312,23 @@ export function trimCommand(doc: CadDocument, targetId: EntityId, pieces: readon
   // user did not ask about constraints, but leaving a dangling one would make
   // every later solve step over a broken row.
   patches.push(...danglingConstraints(doc, [targetId]));
-  for (const p of pieces) patches.push(addEntity(p));
+  // The pieces live in the target's sketch — the one the trimmed curve was on,
+  // recorded on the patch so an undo after switching sketches still restores
+  // them to the right place.
+  const sketchId = sketchOfEntity(doc, targetId)?.id ?? doc.activeSketch;
+  for (const p of pieces) patches.push(addEntity(sketchId, p));
   const label = pieces.length === 0 ? '修剪' : `修剪 (${pieces.length} 段)`;
   return command(label, ...patches);
 }
 
 /**
  * The entities acting as cutting edges while trimming `targetId`: every
- * **visible** entity except the target.
+ * **visible** entity in the target's own sketch, except the target.
+ *
+ * The sketch scope is the same rule the solver and the renderer already apply:
+ * the 2D view only ever shows one plane, so an entity on another plane is not
+ * a boundary the user can see — and its `(x, y)` means something else there,
+ * which would put cut points nowhere near anything on screen.
  *
  * Visibility is filtered because an invisible boundary produces cut points the
  * user cannot see, and a frozen layer's entities are not pickable — treating
@@ -328,8 +338,9 @@ export function trimCommand(doc: CadDocument, targetId: EntityId, pieces: readon
  * the kernel drops such entries defensively rather than shredding it.
  */
 export function cuttingEdgeIds(doc: CadDocument, targetId: EntityId): EntityId[] {
+  const sketch = sketchOfEntity(doc, targetId) ?? activeSketch(doc);
   const ids: EntityId[] = [];
-  for (const e of doc.entities) {
+  for (const e of sketch.entities) {
     if (e.id === targetId) continue;
     const layer = doc.layers.find((l) => l.id === e.layer);
     if (layer && (!layer.visible || layer.frozen)) continue;

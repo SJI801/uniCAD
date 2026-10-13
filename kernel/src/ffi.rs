@@ -1238,6 +1238,137 @@ pub fn extrude_mesh(
     out
 }
 
+/// Lathe a closed 2D profile around an axis **in its own plane** into
+/// flat-shaded triangles.
+///
+/// `axis` is four floats `[px, py, dx, dy]` — a point and a direction in the
+/// sketch's own 2D coordinates — because that is where the user drew both the
+/// profile and the centreline. `angle` is in radians; negative sweeps the other
+/// way (the kernel flips the axis internally, so the geometry is identical).
+///
+/// Same `frame` contract and same wire format as [`extrude_mesh`], with the
+/// same meaning for `vertexCount == 0`: here it means "not a valid solid of
+/// revolution" — the profile touches or crosses the axis, so the sweep would
+/// fold through itself. A modelling error the front end has a sentence for,
+/// not a crash.
+#[wasm_bindgen]
+pub fn revolve_mesh(
+    encoded: &[f64],
+    counts: &[u32],
+    axis: &[f64],
+    angle: f64,
+    frame: &[f64],
+    tol: f64,
+    max_seg: u32,
+) -> Vec<f32> {
+    let prims = decode_all(encoded, counts);
+    let fr = crate::mesh::Frame::from_slice(frame).unwrap_or_else(crate::mesh::Frame::xy);
+    let mut m = crate::mesh::Mesh::new(fr);
+    if axis.len() >= 4 {
+        let axis_point = Vec2::new(axis[0], axis[1]);
+        let axis_dir = Vec2::new(axis[2], axis[3]);
+        if let Some(first) = prims.first() {
+            if let Some(loop_pts) = crate::mesh::closed_loop(first, tol, max_seg) {
+                if let Some(mesh) =
+                    crate::mesh::revolve(&loop_pts, axis_point, axis_dir, angle, tol, max_seg, &fr)
+                {
+                    m = mesh;
+                }
+            }
+        }
+    }
+    let mut out: Vec<f32> = Vec::with_capacity(1 + m.verts.len());
+    out.push(m.vertex_count() as f32);
+    out.extend_from_slice(&m.verts);
+    out
+}
+
+/// Boolean of two meshes: difference (`op = 0`), union (`1`) or intersection
+/// (`2`) — see `boolean::OP_*`.
+///
+/// Both operands are flat-shaded triangle soups in the **same** coordinate
+/// system — the front end evaluates two features and hands over their meshes —
+/// and the result comes back in the same wire format, ready to draw or to feed
+/// into another boolean.
+///
+/// `vertexCount == 0` means the result has no surface: an operand was empty,
+/// the cutter swallowed the target, or two operands never touch. The caller
+/// turns that into words ("相减后没有剩余实体"), because a blank screen is not an
+/// answer.
+#[wasm_bindgen]
+pub fn boolean_mesh(a: &[f32], b: &[f32], op: u32) -> Vec<f32> {
+    let verts = crate::boolean::boolean(a, b, op);
+    let mut out: Vec<f32> = Vec::with_capacity(1 + verts.len());
+    out.push((verts.len() / 6) as f32);
+    out.extend_from_slice(&verts);
+    out
+}
+
+/// Nearest hit of a ray against one flat-shaded mesh (work package 3.2).
+///
+/// `origin`/`dir` are the eye ray, three floats each; `dir` need not be unit.
+/// Returns `[]` when the ray misses, or `[t, x, y, z, nx, ny, nz]` — the
+/// distance along `dir`, the hit point, and the **stored** normal of the face
+/// that was hit. Back faces count, so a ray that starts inside a solid still
+/// finds the wall in front of it.
+#[wasm_bindgen]
+pub fn pick_mesh(mesh: &[f32], origin: &[f64], dir: &[f64]) -> Vec<f64> {
+    if origin.len() < 3 || dir.len() < 3 {
+        return Vec::new();
+    }
+    match crate::mesh::pick_mesh(mesh, [origin[0], origin[1], origin[2]], [dir[0], dir[1], dir[2]]) {
+        Some((t, p, n)) => vec![t, p[0], p[1], p[2], n[0], n[1], n[2]],
+        None => Vec::new(),
+    }
+}
+
+/// Drill a cylindrical hole into `solid`, in one call.
+///
+/// `point` is on the surface, `normal` is that face's **outward** normal (the
+/// hole runs the other way), `depth` is how far it goes into the material —
+/// zero or negative means through. `count_u`/`spacing_u` and `count_v`/
+/// `spacing_v` turn the single hole into a **grid** on the face's own in-plane
+/// axes (`1 × 1` = just the one). Same wire format as the other mesh entry
+/// points; `vertexCount == 0` means the cut removed everything, which the
+/// caller reports in words.
+#[allow(clippy::too_many_arguments)]
+#[wasm_bindgen]
+pub fn hole_mesh(
+    solid: &[f32],
+    point: &[f64],
+    normal: &[f64],
+    diameter: f64,
+    depth: f64,
+    count_u: u32,
+    spacing_u: f64,
+    count_v: u32,
+    spacing_v: f64,
+    tol: f64,
+    max_seg: u32,
+) -> Vec<f32> {
+    let verts = if point.len() >= 3 && normal.len() >= 3 {
+        crate::boolean::subtract_hole_grid(
+            solid,
+            [point[0], point[1], point[2]],
+            [normal[0], normal[1], normal[2]],
+            diameter,
+            depth,
+            count_u,
+            spacing_u,
+            count_v,
+            spacing_v,
+            tol,
+            max_seg,
+        )
+    } else {
+        solid.to_vec()
+    };
+    let mut out: Vec<f32> = Vec::with_capacity(1 + verts.len());
+    out.push((verts.len() / 6) as f32);
+    out.extend_from_slice(&verts);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

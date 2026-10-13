@@ -10,9 +10,10 @@
  * automatically undoable.
  */
 
-import type { CadDocument, Entity, EntityId, LayerId, PlaneId, Solid, Vec2 } from '../core/types';
+import type { CadDocument, Entity, EntityId, ExtrudeFeature, LayerId, PlaneId, RevolveFeature, Vec2 } from '../core/types';
 import type { Command } from '../core/history';
-import { command, addEntity, addSolid } from '../core/history';
+import { command, addEntity, addFeature } from '../core/history';
+import { featureInsertIndex, findEntity, nextFeatureName, sketchOfEntity } from '../core/doc';
 import {
   makeArc,
   makeCircle,
@@ -20,7 +21,7 @@ import {
   makeLine,
   makePolyline,
   makeRect,
-  newEntityId,
+  newFeatureId,
 } from '../core/entities';
 import { vDist, vSub, vAngle, vNorm } from '../core/types';
 import { cuttingEdgeIds, trimCommand, trimEntity, trimPreview } from '../core/trim';
@@ -173,9 +174,11 @@ export abstract class BaseTool implements Tool {
   }
 
   protected entityInit(ctx: ToolContext): Parameters<typeof makeLine>[0] {
-    const layer = ctx.currentLayer();
-    // Stamped with the active plane so the sketch records where it was drawn.
-    return { layer, plane: ctx.activePlane() };
+    // Which *sketch* a new entity lands in is not stamped here — the patch
+    // carries the active sketch's id (see `addEntity`). Stamping it on the
+    // entity as well would be the same fact written twice, which is how
+    // "sketch says XY, entity says YZ" bugs start.
+    return { layer: ctx.currentLayer() };
   }
 
   protected reset(): void {
@@ -273,9 +276,9 @@ export class LineTool extends BaseTool {
       return { preview: this.preview(), done: false };
     }
 
-    ctx.commit(
-      command('绘制直线', addEntity(makeLine(this.entityInit(ctx), from, ev.point))),
-    );
+      ctx.commit(
+        command('绘制直线', addEntity(ctx.doc.activeSketch, makeLine(this.entityInit(ctx), from, ev.point))),
+      );
     this.points.push({ ...ev.point });
     return { preview: this.preview(), done: false, prompt: LineTool.NEXT };
   }
@@ -290,7 +293,7 @@ export class LineTool extends BaseTool {
     const last = this.points[this.points.length - 1]!;
     this.reset();
     if (vDist(first, last) < 1e-9) return false;
-    ctx.commit(command('绘制直线', addEntity(makeLine(this.entityInit(ctx), last, first))));
+    ctx.commit(command('绘制直线', addEntity(ctx.doc.activeSketch, makeLine(this.entityInit(ctx), last, first))));
     return true;
   }
 }
@@ -357,7 +360,7 @@ export class PolylineTool extends BaseTool {
   private finish(ctx: ToolContext, close: boolean): boolean {
     if (this.points.length >= 2) {
       const e = makePolyline(this.entityInit(ctx), this.points, close);
-      ctx.commit(command('绘制多段线', addEntity(e)));
+      ctx.commit(command('绘制多段线', addEntity(ctx.doc.activeSketch, e)));
       this.reset();
       return true;
     }
@@ -421,7 +424,7 @@ export class RectTool extends BaseTool {
         return { preview: this.preview(), done: false, prompt: '矩形尺寸为零，请重新指定角点:' };
       }
       const e = makeRect(this.entityInit(ctx), a, ev.point);
-      ctx.commit(command('绘制矩形', addEntity(e)));
+      ctx.commit(command('绘制矩形', addEntity(ctx.doc.activeSketch, e)));
       this.reset();
       return { preview: EMPTY_PREVIEW, done: true, prompt: 'RECTANG 指定第一个角点:' };
     }
@@ -472,7 +475,7 @@ export class CircleTool extends BaseTool {
         return { preview: this.preview(), done: false, prompt: '半径为零，请重新指定:' };
       }
       const e = makeCircle(this.entityInit(ctx), center, r);
-      ctx.commit(command('绘制圆', addEntity(e)));
+      ctx.commit(command('绘制圆', addEntity(ctx.doc.activeSketch, e)));
       this.reset();
       return { preview: EMPTY_PREVIEW, done: true, prompt: 'CIRCLE 指定圆心:' };
     }
@@ -480,7 +483,7 @@ export class CircleTool extends BaseTool {
       const nums = parseNumbers(ev.value);
       if (this.points.length === 1 && nums.length >= 1) {
         const e = makeCircle(this.entityInit(ctx), this.points[0]!, nums[0]!);
-        ctx.commit(command('绘制圆', addEntity(e)));
+        ctx.commit(command('绘制圆', addEntity(ctx.doc.activeSketch, e)));
         this.reset();
         return { preview: EMPTY_PREVIEW, done: true, prompt: 'CIRCLE 指定圆心:' };
       }
@@ -569,7 +572,7 @@ export class ArcTool extends BaseTool {
       arc.startAngle,
       arc.endAngle,
     );
-    ctx.commit(command('绘制圆弧', addEntity(e)));
+    ctx.commit(command('绘制圆弧', addEntity(ctx.doc.activeSketch, e)));
     this.reset();
     return { preview: EMPTY_PREVIEW, done: true, prompt: 'ARC 指定起点:' };
   }
@@ -649,7 +652,7 @@ export class EllipseTool extends BaseTool {
       }
       // Done in one drag — matches the "corner drag" idiom users expect.
       const e = makeEllipse(this.entityInit(ctx), c, this.rx, this.ry, 0);
-      ctx.commit(command('绘制椭圆', addEntity(e)));
+      ctx.commit(command('绘制椭圆', addEntity(ctx.doc.activeSketch, e)));
       this.reset();
       this.stage = 0;
       return { preview: EMPTY_PREVIEW, done: true, prompt: 'ELLIPSE 指定中心点:' };
@@ -888,7 +891,7 @@ export class TrimTool extends BaseTool {
     // and the edit drift apart exactly where it matters most.
     let id = this.hoverTarget;
     let at = this.hoverAt;
-    if (!id || !ctx.doc.entities.some((e) => e.id === id)) {
+    if (!id || findEntity(ctx.doc, id) === undefined) {
       id = ctx.pick(point);
       at = null;
     }
@@ -1063,7 +1066,10 @@ export class OffsetTool extends BaseTool {
     if (!off) {
       return { preview: this.preview(), done: false, prompt: this.promptText() };
     }
-    ctx.commit(command('偏置', addEntity(off)));
+    // The offset belongs to the target's sketch, like a trim's pieces — the
+    // patch records it rather than assuming the active sketch at undo time.
+    const sketchId = sketchOfEntity(ctx.doc, this.targetId!)?.id ?? ctx.doc.activeSketch;
+    ctx.commit(command('偏置', addEntity(sketchId, off)));
     // Stay armed at the same distance so a run of curves offsets together.
     this.targetId = null;
     this.previewEntity = null;
@@ -1076,7 +1082,7 @@ export class OffsetTool extends BaseTool {
     const id = this.targetId;
     const cursor = this.cursor;
     if (!id || !cursor) return;
-    const target = ctx.doc.entities.find((e) => e.id === id);
+    const target = findEntity(ctx.doc, id);
     if (!target) {
       this.targetId = null;
       return;
@@ -1104,9 +1110,11 @@ export class OffsetTool extends BaseTool {
  * that the sketch states exactly what the part is; a 3D drag-preview is a Phase 2
  * nicety.
  *
- * The tool commits a `Solid` *record* (sketch id + height) — never a triangle.
- * The mesh is re-derived by the kernel on the render path, so editing the sketch,
- * or the height, changes the solid with nothing baked.
+ * The tool commits an `ExtrudeFeature` *record* (which sketch, which profile,
+ * what height) — never a triangle. The mesh is re-derived by the kernel on the
+ * render path, so editing the sketch, or the height, changes the solid with
+ * nothing baked. The feature is inserted into the tree right after the sketch
+ * it belongs to; order there is evaluation order.
  */
 export class ExtrudeTool extends BaseTool {
   readonly id = 'extrude';
@@ -1157,13 +1165,20 @@ export class ExtrudeTool extends BaseTool {
       if (!Number.isFinite(height) || Math.abs(height) <= 1e-9) {
         return { preview: EMPTY_PREVIEW, done: false, prompt: '请输入一个非零的拉伸高度:' };
       }
-      const solid: Solid = {
-        id: newEntityId('s'),
-        source: this.targetId,
+      // The feature points at the sketch that owns the profile — not at "the
+      // active sketch", which a plane switch between pick and commit could
+      // make a different one.
+      const sketchId = sketchOfEntity(ctx.doc, this.targetId)?.id ?? ctx.doc.activeSketch;
+      const feature: ExtrudeFeature = {
+        kind: 'extrude',
+        id: newFeatureId(),
+        name: nextFeatureName(ctx.doc, 'extrude'),
+        sketch: sketchId,
+        profile: this.targetId,
         height,
         layer: ctx.currentLayer(),
       };
-      ctx.commit(command('拉伸', addSolid(solid)));
+      ctx.commit(command('拉伸', addFeature(feature, featureInsertIndex(ctx.doc, sketchId))));
       this.targetId = null;
       return { preview: EMPTY_PREVIEW, done: true, prompt: this.initialPrompt };
     }
@@ -1182,6 +1197,184 @@ export class ExtrudeTool extends BaseTool {
 
   private promptNow(): string {
     return this.targetId ? 'EXTRUDE 输入拉伸高度后回车:' : this.initialPrompt;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// REVOLVE — lathe a closed profile about a line in the same sketch
+// ---------------------------------------------------------------------------
+
+/**
+ * Revolve: pick a closed profile, pick the centreline to spin it about, type an
+ * angle in degrees.
+ *
+ * **Two picks, because the axis is geometry rather than a setting.** In a CAD
+ * sketch the centreline *is* a curve, and the feature references that line by
+ * id — so moving the line re-lathes the solid, and deleting it turns the feature
+ * into an error node instead of silently spinning about wherever the axis used
+ * to be.
+ *
+ * The angle is typed in degrees (what a user reads off a protractor) and stored
+ * in radians (what the kernel sweeps). A negative angle sweeps the other way;
+ * `core/evaluate.ts` and the kernel share that convention — see `mesh::revolve`.
+ */
+export class RevolveTool extends BaseTool {
+  readonly id = 'revolve';
+  readonly name = '旋转';
+  readonly alias = 'REV';
+  readonly initialPrompt = 'REVOLVE 选择要旋转的封闭轮廓（矩形/圆/闭合多段线）:';
+
+  private targetId: EntityId | null = null;
+  private axisId: EntityId | null = null;
+
+  override activate(): void {
+    super.activate();
+    this.targetId = null;
+    this.axisId = null;
+  }
+
+  override cancel(): void {
+    super.cancel();
+    this.targetId = null;
+    this.axisId = null;
+  }
+
+  override anchor(): Vec2 | null {
+    // No "from" point: both picks name objects; neither is a placement.
+    return null;
+  }
+
+  override preview(): PreviewGeometry {
+    // Like extrude: nothing exists until the angle is known, and once it does it
+    // is drawn by the 3D pass rather than as 2D preview geometry.
+    return EMPTY_PREVIEW;
+  }
+
+  handle(ev: ToolEvent, ctx: ToolContext): ToolResult {
+    if (
+      ev.kind === 'escape' ||
+      ev.kind === 'enter' ||
+      (ev.kind === 'click' && ev.button === 'right')
+    ) {
+      this.reset();
+      this.targetId = null;
+      this.axisId = null;
+      return { preview: EMPTY_PREVIEW, done: true, prompt: this.initialPrompt };
+    }
+
+    if (ev.kind === 'text') {
+      if (!this.targetId || !this.axisId) {
+        return { preview: EMPTY_PREVIEW, done: false, prompt: this.promptNow() };
+      }
+      const nums = parseNumbers(ev.value);
+      const deg = nums.length >= 1 ? nums[0]! : NaN;
+      if (!Number.isFinite(deg) || Math.abs(deg) <= 1e-9) {
+        return { preview: EMPTY_PREVIEW, done: false, prompt: '请输入一个非零的角度（度）:' };
+      }
+      // Beyond a full turn the kernel would sweep over itself; refuse instead of
+      // producing a self-intersecting solid.
+      if (Math.abs(deg) > 360 + 1e-9) {
+        return { preview: EMPTY_PREVIEW, done: false, prompt: '角度请填 -360 到 360 之间:' };
+      }
+      // The feature belongs to the sketch that owns the profile — recorded on
+      // the node, never "whatever is active at commit time".
+      const sketchId = sketchOfEntity(ctx.doc, this.targetId)?.id ?? ctx.doc.activeSketch;
+      const feature: RevolveFeature = {
+        kind: 'revolve',
+        id: newFeatureId(),
+        name: nextFeatureName(ctx.doc, 'revolve'),
+        sketch: sketchId,
+        profile: this.targetId,
+        axis: this.axisId,
+        angle: (deg * Math.PI) / 180,
+        layer: ctx.currentLayer(),
+      };
+      ctx.commit(command('旋转', addFeature(feature, featureInsertIndex(ctx.doc, sketchId))));
+      this.targetId = null;
+      this.axisId = null;
+      return { preview: EMPTY_PREVIEW, done: true, prompt: this.initialPrompt };
+    }
+
+    if (ev.kind === 'click' && ev.button === 'left') {
+      const id = ctx.pick(ev.point);
+      if (!id) {
+        return {
+          preview: EMPTY_PREVIEW,
+          done: false,
+          prompt: this.targetId ? '没点到对象，请点在一根直线上作为旋转轴:' : '没点到对象，请点在一个封闭轮廓上:',
+        };
+      }
+      if (!this.targetId) {
+        this.targetId = id;
+        return { preview: EMPTY_PREVIEW, done: false, prompt: 'REVOLVE 选择旋转轴（点一根直线）:' };
+      }
+      // The axis has to be a line with length — the same rule the evaluator
+      // enforces, applied here while the user is still inside the command so the
+      // mistake is a sentence rather than a red node later.
+      const axis = findEntity(ctx.doc, id);
+      if (
+        !axis ||
+        axis.type !== 'line' ||
+        Math.hypot(axis.b.x - axis.a.x, axis.b.y - axis.a.y) <= 1e-12
+      ) {
+        return { preview: EMPTY_PREVIEW, done: false, prompt: '旋转轴必须是一根有长度的直线，请重新点:' };
+      }
+      if (id === this.targetId) {
+        return { preview: EMPTY_PREVIEW, done: false, prompt: '旋转轴不能就是轮廓本身，请点一根直线:' };
+      }
+      this.axisId = id;
+      return { preview: EMPTY_PREVIEW, done: false, prompt: 'REVOLVE 输入旋转角度（度）后回车:' };
+    }
+
+    return { preview: EMPTY_PREVIEW, done: false, prompt: this.promptNow() };
+  }
+
+  private promptNow(): string {
+    if (!this.targetId) return this.initialPrompt;
+    if (!this.axisId) return 'REVOLVE 选择旋转轴（点一根直线）:';
+    return 'REVOLVE 输入旋转角度（度）后回车:';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// HOLE — drill a face, from the 3D view (work package 3.2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Hole: activate it, then click a solid's face in the 3D view.
+ *
+ * The tool itself does nothing on a 2D click, and that is deliberate: a hole
+ * needs a *face*, and faces only exist in the 3D view. The click is handled
+ * where the 3D view dispatches its own clicks (`CanvasView`'s orbit-drag end),
+ * next to the datum-plane pick it resembles — rather than by teaching this
+ * state machine about rays, which would put a second, worse camera in the tool
+ * layer.
+ *
+ * So this class exists to own the command: the ribbon button, the `H` alias,
+ * the prompt, and Escape.
+ */
+export class HoleTool extends BaseTool {
+  readonly id = 'hole';
+  readonly name = '打孔';
+  readonly alias = 'H';
+  readonly initialPrompt = 'HOLE 在 3D 视图里点一个实体的表面（参数建好后在特征树上改）:';
+
+  override anchor(): Vec2 | null {
+    return null;
+  }
+
+  override preview(): PreviewGeometry {
+    return EMPTY_PREVIEW;
+  }
+
+  handle(ev: ToolEvent, _ctx: ToolContext): ToolResult {
+    if (ev.kind === 'escape' || ev.kind === 'enter' || (ev.kind === 'click' && ev.button === 'right')) {
+      this.reset();
+      return { preview: EMPTY_PREVIEW, done: true, prompt: this.initialPrompt };
+    }
+    // A 2D click is not a mistake to report — the user may simply be looking at
+    // the 2D view. The prompt already says where the click has to land.
+    return { preview: EMPTY_PREVIEW, done: false, prompt: this.initialPrompt };
   }
 }
 

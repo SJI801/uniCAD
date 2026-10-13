@@ -17,7 +17,6 @@ import type {
   LayerId,
   LineEntity,
   LineStyle,
-  PlaneId,
   PolylineEntity,
   Vec2,
 } from './types';
@@ -28,12 +27,31 @@ import type {
 
 let counter = 0;
 
-/** Monotonic, collision-free-within-a-session entity id. */
-export function newEntityId(prefix = 'e'): string {
+/** One monotonic id with a random suffix — collision-free within a session. */
+function mintId(prefix: string): string {
   counter += 1;
   // Include a random suffix so ids remain unique when files are merged.
   const rnd = Math.floor(Math.random() * 0xffff).toString(36);
   return `${prefix}-${counter.toString(36)}-${rnd}`;
+}
+
+/** Monotonic, collision-free-within-a-session entity id. */
+export function newEntityId(prefix = 'e'): string {
+  return mintId(prefix);
+}
+
+/**
+ * Sketch ids share the entity counter but not its prefix — a sketch is a tree
+ * node, not geometry, and "which kind of thing is this id" should be readable
+ * from the id itself (the tree panel and the patch layer both key on it).
+ */
+export function newSketchId(): string {
+  return mintId('sketch');
+}
+
+/** Feature ids, same reasoning as sketches. */
+export function newFeatureId(): string {
+  return mintId('f');
 }
 
 export function newLayerId(name: string): LayerId {
@@ -110,8 +128,11 @@ export interface EntityInit {
   color?: string | null;
   lineStyle?: LineStyle | null;
   lineWeight?: number | null;
-  /** The datum plane the sketch is drawn on (defaults to XY when omitted). */
-  plane?: PlaneId;
+  /**
+   * No `plane` here: the hosting sketch owns the plane (stage 1 removed the
+   * per-entity stamp). The sketch a new entity joins is decided where the
+   * patch is built — `addEntity(sketch, e)` — not by the factory.
+   */
   name?: string;
 }
 
@@ -121,7 +142,6 @@ function base(init: EntityInit): {
   color: string | null;
   lineStyle: LineStyle | null;
   lineWeight: number | null;
-  plane?: PlaneId;
   name?: string;
 } {
   const out: {
@@ -130,7 +150,6 @@ function base(init: EntityInit): {
     color: string | null;
     lineStyle: LineStyle | null;
     lineWeight: number | null;
-    plane?: PlaneId;
     name?: string;
   } = {
     id: newEntityId(),
@@ -139,10 +158,6 @@ function base(init: EntityInit): {
     lineStyle: init.lineStyle ?? null,
     lineWeight: init.lineWeight ?? null,
   };
-  // Only written when the caller names a plane: an entity with no `plane` field
-  // is what "on XY" has always meant, so old documents and old expectations both
-  // keep working.
-  if (init.plane !== undefined) out.plane = init.plane;
   if (init.name !== undefined) out.name = init.name;
   return out;
 }

@@ -21,6 +21,7 @@
  */
 
 import type { CadDocument, Constraint, ConstraintKind, Entity, EntityId, Vec2 } from '../core/types';
+import { findEntity } from '../core/doc';
 import { constraintPointAt, describeEntity, entityBoundsTS } from '../core/entities';
 import {
   CONSTRAINT_GLYPH,
@@ -54,7 +55,7 @@ const MAX_BADGES = 40;
  */
 function anchorFor(c: Constraint, doc: CadDocument): Vec2 | null {
   const at = (t: { entity: EntityId; point: string; index?: number }): Vec2 | null => {
-    const e = doc.entities.find((x) => x.id === t.entity);
+    const e = findEntity(doc, t.entity);
     if (!e) return null;
     return constraintPointAt(e, t.point as never, t.index ?? 0);
   };
@@ -71,7 +72,7 @@ function anchorFor(c: Constraint, doc: CadDocument): Vec2 | null {
 
   // No point on either side — put it on the first entity's corner so the badge
   // is at least attached to *something* that was drawn.
-  const e = doc.entities.find((x) => x.id === c.a.entity);
+  const e = findEntity(doc, c.a.entity);
   if (!e) return null;
   const b = entityBoundsTS(e);
   return { x: b.maxX, y: b.maxY };
@@ -154,7 +155,7 @@ function anchorBadges(
   for (const c of doc.constraints) {
     if (!ANCHOR_KINDS.has(c.kind)) continue;
     if (!selected.has(c.a.entity) || !onVisibleLayer.has(c.a.entity)) continue;
-    const e = doc.entities.find((x) => x.id === c.a.entity);
+    const e = findEntity(doc, c.a.entity);
     if (!e) continue;
     const index = c.a.index ?? 0;
     const at = constraintPointAt(e, c.a.point, index);
@@ -243,8 +244,8 @@ export function constraintGuides(
     // Property narrowing on `c.b` does not survive into an arrow-function
     // callback, so hoist it before the `find` calls below.
     const bTarget = c.b;
-    const ea = doc.entities.find((x) => x.id === c.a.entity);
-    const eb = doc.entities.find((x) => x.id === bTarget.entity);
+    const ea = findEntity(doc, c.a.entity);
+    const eb = findEntity(doc, bTarget.entity);
     if (!ea || !eb) continue;
     if (!onVisibleLayer.has(ea.id) || !onVisibleLayer.has(eb.id)) continue;
 

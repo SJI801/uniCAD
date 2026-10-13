@@ -33,6 +33,7 @@ import type {
 } from '../core/types';
 import { createEmptyDocument } from '../core/types';
 import { newEntityId, newLayerId } from '../core/entities';
+import { appendEntities, replaceEntities, sketchEntities } from '../core/doc';
 
 // ---------------------------------------------------------------------------
 // Group code writer
@@ -245,8 +246,13 @@ export function exportDxf(doc: CadDocument, opts: DxfExportOptions = {}): string
   w.g(0, 'ENDSEC');
 
   // ---- ENTITIES ----------------------------------------------------------
+  // The **active sketch** only — the same set the 2D view draws. DXF is a flat
+  // 2D exchange format, and an entity on another datum plane has no position
+  // in one drawing: exporting it would lay its (u, v) on top of unrelated
+  // coordinates. (`PHASE1_PLAN.md` risk 7; the README's format section is
+  // where this gets promised to users, in work package 1.6.)
   w.g(0, 'SECTION').g(2, 'ENTITIES');
-  for (const e of doc.entities) writeEntity(w, doc, e);
+  for (const e of sketchEntities(doc)) writeEntity(w, doc, e);
   w.g(0, 'ENDSEC');
 
   w.g(0, 'EOF');
@@ -379,7 +385,9 @@ function computeExtents(doc: CadDocument): { minX: number; minY: number; maxX: n
   let maxX = 0;
   let maxY = 0;
   let first = true;
-  for (const e of doc.entities) {
+  // The exported set — the active sketch (see `exportDxf`). Extents that
+  // covered geometry the file does not contain would be a header lie.
+  for (const e of sketchEntities(doc)) {
     for (const p of entityPoints(e)) {
       if (first) {
         minX = maxX = p.x;
@@ -590,7 +598,10 @@ export function importDxf(text: string, title = 'DXF Import'): DxfImportResult {
   const doc = createEmptyDocument(title);
   doc.layers = layers;
   doc.currentLayer = layers[0]!.id;
-  doc.entities = entities;
+  // A DXF file is one flat 2D drawing, so its entities land in the active
+  // sketch of the fresh document (work package 1.6 turns this into an
+  // explicit sketch node; the destination is already decided here).
+  replaceEntities(doc, doc.activeSketch, entities);
 
   if (entities.length === 0) {
     warnings.push('未从 DXF 中读取到任何图元。');
@@ -866,7 +877,10 @@ export function importDxfComplete(text: string, title = 'DXF Import'): DxfImport
   };
   const heavy = collectHeavyPolylines(pairs, resolveLayer);
   if (heavy.length > 0) {
-    result.doc.entities.push(...heavy);
+    // Merged into the active sketch, like the rest of an import. Through the
+    // document's write API rather than a bare push so there is exactly one
+    // owner of the entity store.
+    appendEntities(result.doc, result.doc.activeSketch, heavy);
     const filtered = result.warnings.filter((w) => !w.includes('未从 DXF'));
     result.warnings = filtered;
   }
