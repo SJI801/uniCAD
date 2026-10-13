@@ -129,7 +129,9 @@ export default function FeatureTree(): React.ReactElement {
                 updateFeatureById(
                   id,
                   (f) => (f.kind === 'hole' ? { ...f, ...patch } : f),
-                  patch.diameter !== undefined ? `改孔径: ${patch.diameter}` : `改孔深: ${patch.depth}`,
+                  `改孔参数: ${Object.entries(patch)
+                    .map(([k, v]) => `${k}=${v}`)
+                    .join(' ')}`,
                 )
               }
               onPatternParam={(id, patch) =>
@@ -161,7 +163,8 @@ export default function FeatureTree(): React.ReactElement {
           双击名字改名，双击数值（高度 / 角度）改参数。红点 = 该特征求值失败，悬停看原因。
           布尔：先点选「被减」的特征，再点另一行的 ⊖ 建一个差集；建好后行内的下拉可改成 并 / 交，
           算子会变灰（已消耗 —— 它们的面已经成为结果的一部分）。
-          打孔：按 H（或点工具栏「⊚ 打孔」）后在 3D 视图里点一个实体的表面；⌀ 与深度在这一行上双击改。
+          打孔：按 H（或点工具栏「⊚ 打孔」）后在 3D 视图里点一个实体的表面；这一行有四个数
+          —— 孔径 / 深度（0 = 通孔）/ 沉孔直径 / 沉孔深度，都双击改（沉孔直径填 0 就是不沉孔）。
           阵列：点孔那一行的 ▦ —— 默认一排 3 个；把第二方向的**数量**改成 2 就是一片孔阵。
           实例是**算出来的**：改源孔的 ⌀ 或深度，整片孔一起变。
         </p>
@@ -187,8 +190,11 @@ interface RowProps {
   onSuppress: (id: FeatureId, on: boolean) => void;
   /** Change a boolean's operation (差 / 并 / 交) in place. */
   onOp: (id: FeatureId, op: BooleanFeature['op']) => void;
-  /** Change a hole's diameter and/or depth. */
-  onHole: (id: FeatureId, patch: { diameter?: number; depth?: number }) => void;
+  /** Change a hole's diameter, depth, and/or counterbore. */
+  onHole: (
+    id: FeatureId,
+    patch: { diameter?: number; depth?: number; boreDiameter?: number; boreDepth?: number },
+  ) => void;
   /** Change a pattern's instance counts and/or their spacings. */
   onPatternParam: (
     id: FeatureId,
@@ -297,6 +303,22 @@ function TreeNodeRow(props: RowProps): React.ReactElement {
       unit: ' mm',
       label: '深度（0 = 通孔）',
       set: (v) => props.onHole(feature.id, { depth: Math.max(0, v) }),
+    });
+    params.push({
+      slot: 'param3',
+      value: feature.boreDiameter,
+      key: 'feature.boreDiameter',
+      unit: ' ⌀',
+      label: '沉孔直径（0 = 不沉孔）',
+      set: (v) => props.onHole(feature.id, { boreDiameter: v }),
+    });
+    params.push({
+      slot: 'param4',
+      value: feature.boreDepth,
+      key: 'feature.boreDepth',
+      unit: ' mm',
+      label: '沉孔深度',
+      set: (v) => props.onHole(feature.id, { boreDepth: Math.max(0, v) }),
     });
   } else if (feature.kind === 'pattern') {
     params.push({

@@ -906,6 +906,10 @@ export const useEditor = create<EditorState>((set, get) => ({
       normal,
       diameter,
       depth,
+      // No counterbore until asked: the click already placed the hole, and a
+      // recess nobody asked for would be a surprise in the solid.
+      boreDiameter: 0,
+      boreDepth: 0,
       // A hole belongs to the body it was drilled into.
       layer: base.layer,
     };

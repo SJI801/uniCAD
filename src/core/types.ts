@@ -588,6 +588,14 @@ export interface HoleFeature extends FeatureBase {
   diameter: number;
   /** Depth into the material; `0` = through. */
   depth: number;
+  /**
+   * Counterbore: a wider, shallower recess at the entry, for a socket-head
+   * screw to sit in. `0` = none. A *conical* countersink (flat-head screw) is a
+   * different cutter and a separate piece of work.
+   */
+  boreDiameter: number;
+  /** How deep that recess goes; ignored when `boreDiameter` is 0. */
+  boreDepth: number;
   layer: LayerId;
 }
 

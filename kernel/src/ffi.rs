@@ -1328,8 +1328,9 @@ pub fn pick_mesh(mesh: &[f32], origin: &[f64], dir: &[f64]) -> Vec<f64> {
 /// hole runs the other way), `depth` is how far it goes into the material —
 /// zero or negative means through. `count_u`/`spacing_u` and `count_v`/
 /// `spacing_v` turn the single hole into a **grid** on the face's own in-plane
-/// axes (`1 × 1` = just the one). Same wire format as the other mesh entry
-/// points; `vertexCount == 0` means the cut removed everything, which the
+/// axes (`1 × 1` = just the one). `bore_diameter`/`bore_depth` add a wider,
+/// shallower recess at each entry (0 = none). Same wire format as the other mesh
+/// entry points; `vertexCount == 0` means the cut removed everything, which the
 /// caller reports in words.
 #[allow(clippy::too_many_arguments)]
 #[wasm_bindgen]
@@ -1343,6 +1344,8 @@ pub fn hole_mesh(
     spacing_u: f64,
     count_v: u32,
     spacing_v: f64,
+    bore_diameter: f64,
+    bore_depth: f64,
     tol: f64,
     max_seg: u32,
 ) -> Vec<f32> {
@@ -1357,6 +1360,8 @@ pub fn hole_mesh(
             spacing_u,
             count_v,
             spacing_v,
+            bore_diameter,
+            bore_depth,
             tol,
             max_seg,
         )

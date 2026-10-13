@@ -465,8 +465,8 @@ pub fn subtract_hole(
 ) -> Vec<f32> {
     subtract_hole_pattern(solid, point, normal, diameter, depth, 1, 0.0, tol, max_seg)
 }
-
-/// Drill a **grid** of cylindrical holes into `solid`, in one call.
+/// Drill a **grid** of holes into `solid`, in one call — optionally each with a
+/// counterbore.
 ///
 /// `count_u × count_v` instances on the face's own in-plane axes, `spacing_u` /
 /// `spacing_v` apart, with the `(0, 0)` instance at `point` itself. Which way
@@ -474,6 +474,12 @@ pub fn subtract_hole(
 /// (`perpendicular_basis`) rather than passed in: the front end has no business
 /// inventing an in-plane axis, and a caller's choice would be a second
 /// convention to keep in step with the normals.
+///
+/// `bore_diameter` / `bore_depth` add a wider, shallower cylinder at each
+/// instance's entry — the flat-bottomed recess a socket-head screw sits in. Zero
+/// (or a diameter no wider than the hole) means no counterbore. A *conical*
+/// countersink, for a flat-head screw, is a different cutter (a cone, not a
+/// cylinder) and a separate piece of work.
 ///
 /// Every cutter goes into **one** soup and is subtracted in **one** boolean
 /// pass — a grid of N holes as N subtractions would re-run the BSP against an
@@ -492,6 +498,8 @@ pub fn subtract_hole_grid(
     spacing_u: f64,
     count_v: u32,
     spacing_v: f64,
+    bore_diameter: f64,
+    bore_depth: f64,
     tol: f64,
     max_seg: u32,
 ) -> Vec<f32> {
@@ -518,6 +526,15 @@ pub fn subtract_hole_grid(
     let circle = Prim::Circle(Circle::new(Vec2::zero(), diameter * 0.5));
     let Some(loop_pts) = crate::mesh::closed_loop(&circle, tol, max_seg) else {
         return solid.to_vec();
+    };
+    // A counterbore no wider than the hole, or with no depth, is not a
+    // counterbore — the caller has already argued about the parameter, and
+    // cutting a second identical cylinder here would only add work.
+    let bore = if bore_diameter > diameter + 1e-9 && bore_depth > 1e-9 {
+        let c = Prim::Circle(Circle::new(Vec2::zero(), bore_diameter * 0.5));
+        crate::mesh::closed_loop(&c, tol, max_seg).map(|pts| (pts, bore_depth))
+    } else {
+        None
     };
 
     // Normalisations, both about not handing the boolean a degeneracy the user
@@ -546,26 +563,44 @@ pub fn subtract_hole_grid(
         }
     }
 
-    let mut cutter: Vec<f32> = Vec::with_capacity(nu as usize * nv as usize * loop_pts.len() * 36);
-    for j in 0..nv {
-        for k in 0..nu {
-            let du = spacing_u * k as f64;
-            let dv = spacing_v * j as f64;
-            let frame = crate::mesh::Frame {
-                origin: [
-                    base_origin[0] + u[0] * du + v[0] * dv,
-                    base_origin[1] + u[1] * du + v[1] * dv,
-                    base_origin[2] + u[2] * du + v[2] * dv,
-                ],
-                u,
-                v,
-                n: inward,
-            };
-            let cylinder = crate::mesh::extrude(&loop_pts, clearance + span, &frame);
-            cutter.extend_from_slice(&cylinder.verts);
+    let per_instance = loop_pts.len() * 36 * 2;
+    let instance_origin = |k: u32, j: u32| -> [f64; 3] {
+        let du = spacing_u * k as f64;
+        let dv = spacing_v * j as f64;
+        [
+            base_origin[0] + u[0] * du + v[0] * dv,
+            base_origin[1] + u[1] * du + v[1] * dv,
+            base_origin[2] + u[2] * du + v[2] * dv,
+        ]
+    };
+    let soup_of = |pts: &[Vec2], length: f64| -> Vec<f32> {
+        let mut soup: Vec<f32> = Vec::with_capacity(nu as usize * nv as usize * per_instance);
+        for j in 0..nv {
+            for k in 0..nu {
+                let frame = crate::mesh::Frame { origin: instance_origin(k, j), u, v, n: inward };
+                let m = crate::mesh::extrude(pts, length, &frame);
+                soup.extend_from_slice(&m.verts);
+            }
         }
+        soup
+    };
+
+    // The recess is cut **before** the hole, in its own pass, rather than being
+    // thrown into the same cutter soup.
+    //
+    // The two cutters overlap by construction — a counterbore contains the hole's
+    // diameter over its own depth — and a boolean handed two overlapping operands
+    // in one soup has to work out their union's boundary by itself. That is a
+    // degeneracy with nothing to gain: cut the recess first, then drill through
+    // it, and each pass sees two solids that merely cross. One extra BSP run for
+    // a counterbored hole is the whole price.
+    let mut result = solid.to_vec();
+    if let Some((bore_pts, bore_depth)) = &bore {
+        let recesses = soup_of(bore_pts, clearance + bore_depth);
+        result = boolean(&result, &recesses, OP_SUBTRACT);
     }
-    boolean(solid, &cutter, OP_SUBTRACT)
+    let holes = soup_of(&loop_pts, clearance + span);
+    boolean(&result, &holes, OP_SUBTRACT)
 }
 
 /// The one-axis case, kept because most callers mean a row.
@@ -581,7 +616,9 @@ pub fn subtract_hole_pattern(
     tol: f64,
     max_seg: u32,
 ) -> Vec<f32> {
-    subtract_hole_grid(solid, point, normal, diameter, depth, count, spacing, 1, 0.0, tol, max_seg)
+    subtract_hole_grid(
+        solid, point, normal, diameter, depth, count, spacing, 1, 0.0, 0.0, 0.0, tol, max_seg,
+    )
 }
 
 /// Bounding-box diagonal — the length scale used for tolerances and for
@@ -1148,7 +1185,7 @@ mod tests {
         let block = box_soup(0.0, 0.0, 0.0, 40.0, 40.0, 20.0);
         let grid = |cu: u32, cv: u32| {
             subtract_hole_grid(
-                &block, [10.0, 10.0, 20.0], [0.0, 0.0, 1.0], 4.0, 0.0, cu, 12.0, cv, 12.0, 0.05, 256,
+                &block, [10.0, 10.0, 20.0], [0.0, 0.0, 1.0], 4.0, 0.0, cu, 12.0, cv, 12.0, 0.0, 0.0, 0.05, 256,
             )
         };
         let hole = prism_volume(2.0, 20.0);
@@ -1167,12 +1204,60 @@ mod tests {
         let block = box_soup(0.0, 0.0, 0.0, 40.0, 40.0, 20.0);
         let vol = |cu: u32, cv: u32| {
             crate::mesh::soup_volume(&subtract_hole_grid(
-                &block, [10.0, 10.0, 20.0], [0.0, 0.0, 1.0], 4.0, 0.0, cu, 12.0, cv, 12.0, 0.05, 256,
+                &block, [10.0, 10.0, 20.0], [0.0, 0.0, 1.0], 4.0, 0.0, cu, 12.0, cv, 12.0, 0.0, 0.0, 0.05, 256,
             ))
         };
         let hole = prism_volume(2.0, 20.0);
         assert!((vol(3, 1) - (32000.0 - 3.0 * hole)).abs() < 1e-2, "row along u");
         assert!((vol(1, 3) - (32000.0 - 3.0 * hole)).abs() < 1e-2, "row along v");
+    }
+
+    /// A counterbored hole: the recess is ⌀8 × 2 at the entry, the rest is ⌀4.
+    /// The two cylinders overlap over the top 2 mm, so the removed volume is
+    /// `⌀8 × 2 + ⌀4 × 8` — and a counterbore that forgot to exclude the overlap
+    /// would come out high by exactly the ⌀4 core through those 2 mm.
+    #[test]
+    fn a_counterbore_adds_a_recess_and_not_a_double_count() {
+        let block = box_soup(0.0, 0.0, 0.0, 10.0, 10.0, 10.0);
+        let out = subtract_hole_grid(
+            &block, [5.0, 5.0, 10.0], [0.0, 0.0, 1.0], 4.0, 0.0, 1, 0.0, 1, 0.0, 8.0, 2.0, 0.05, 256,
+        );
+        let expect = 1000.0 - prism_volume(4.0, 2.0) - prism_volume(2.0, 8.0);
+        let v = crate::mesh::soup_volume(&out);
+        assert!((v - expect).abs() < expect * 1e-3, "counterbored volume {v}, expected {expect}");
+    }
+
+    /// A bore no wider than the hole is not a counterbore: the result must be
+    /// exactly the plain hole, not a second identical cylinder's worth of work.
+    #[test]
+    fn a_narrow_bore_is_ignored() {
+        let block = box_soup(0.0, 0.0, 0.0, 10.0, 10.0, 10.0);
+        let vol = |bore_d: f64, bore_depth: f64| {
+            crate::mesh::soup_volume(&subtract_hole_grid(
+                &block, [5.0, 5.0, 10.0], [0.0, 0.0, 1.0], 4.0, 0.0, 1, 0.0, 1, 0.0, bore_d, bore_depth,
+                0.05, 256,
+            ))
+        };
+        let plain = 1000.0 - prism_volume(2.0, 10.0);
+        assert!((vol(0.0, 0.0) - plain).abs() < 1e-3, "no bore");
+        assert!((vol(4.0, 3.0) - plain).abs() < 1e-3, "bore as wide as the hole");
+        assert!((vol(3.0, 3.0) - plain).abs() < 1e-3, "bore narrower than the hole");
+        assert!((vol(8.0, 0.0) - plain).abs() < 1e-3, "bore with no depth");
+    }
+
+    /// A counterbored grid: every instance gets its own recess, so the volume is
+    /// the per-instance amount times the count.
+    #[test]
+    fn every_instance_of_a_grid_gets_its_counterbore() {
+        let block = box_soup(0.0, 0.0, 0.0, 40.0, 40.0, 20.0);
+        let one = crate::mesh::soup_volume(&subtract_hole_grid(
+            &block, [10.0, 10.0, 20.0], [0.0, 0.0, 1.0], 4.0, 0.0, 1, 12.0, 1, 12.0, 8.0, 3.0, 0.05, 256,
+        ));
+        let four = crate::mesh::soup_volume(&subtract_hole_grid(
+            &block, [10.0, 10.0, 20.0], [0.0, 0.0, 1.0], 4.0, 0.0, 2, 12.0, 2, 12.0, 8.0, 3.0, 0.05, 256,
+        ));
+        let per = 32000.0 - one;
+        assert!((four - (32000.0 - 4.0 * per)).abs() < 0.05, "four counterbored holes {four}");
     }
 
     /// Boolean chained on a boolean — the `ROADMAP`'s nesting criterion in

@@ -184,6 +184,7 @@ export interface KernelModule {
     solid: Float32Array, point: Float64Array, normal: Float64Array,
     diameter: number, depth: number,
     countU: number, spacingU: number, countV: number, spacingV: number,
+    boreDiameter: number, boreDepth: number,
     tol: number, maxSeg: number,
   ): Float32Array;
   fillet(
@@ -1188,7 +1189,8 @@ export function pickMesh(
  *
  * `depth === 0` means through. `countU × countV` drills a **grid** on the face's
  * own in-plane axes, `spacingU`/`spacingV` apart, the first at `point` — one
- * cutter soup, one boolean pass, however many instances.
+ * cutter soup, one boolean pass, however many instances. `boreDiameter`/
+ * `boreDepth` add a wider recess at each entry (`0` = none).
  *
  * `null` means the cut left no solid at all.
  */
@@ -1202,6 +1204,8 @@ export function holeMesh(
   spacingU = 0,
   countV = 1,
   spacingV = 0,
+  boreDiameter = 0,
+  boreDepth = 0,
   tol = 0.05,
   maxSeg = 256,
 ): Float32Array | null {
@@ -1215,6 +1219,8 @@ export function holeMesh(
     spacingU,
     countV,
     spacingV,
+    boreDiameter,
+    boreDepth,
     tol,
     maxSeg,
   );
