@@ -11,7 +11,7 @@ import { useEditor } from '../state/editorStore';
 import { ALIAS_TO_TOOL } from '../tools/registry';
 import { fmt, SNAP_KIND_LABEL, type ConstraintMode } from '../core/types';
 import { describeConstraint } from '../core/constraints';
-import { allEntities } from '../core/doc';
+import { allEntities, featuresOf } from '../core/doc';
 
 export default function StatusBar(): React.ReactElement {
   const prompt = useEditor((s) => s.prompt);
@@ -217,6 +217,7 @@ export default function StatusBar(): React.ReactElement {
         </span>
 
         <span className="status-chip mono dim">图元 {allEntities(doc).length}</span>
+        <FeatureCountChip />
         {selection.size > 0 && <span className="status-chip accent">已选 {selection.size}</span>}
 
         <SketchStatusChip />
@@ -308,6 +309,30 @@ function SketchStatusChip(): React.ReactElement | null {
     >
       {text}
     </button>
+  );
+}
+
+/**
+ * 特征树计数（阶段 1 之后的观测口）：特征总数 / 其中求出实体的个数。
+ *
+ * 求值器每一条**真命令**都全量重算一遍，所以这两个数一起看才有意义：
+ * 「特征 3 / 实体 2」说明有**一个特征没算出网格**（被抑制、或者在报错，
+ * 后者另有红点 chip），而「特征 3 / 实体 3」才说明整棵树都活着。
+ * 抑制的、报错的、被布尔消耗掉的都不算「实体」—— 它们画不出来。
+ */
+function FeatureCountChip(): React.ReactElement | null {
+  const doc = useEditor((s) => s.doc);
+  const featureEval = useEditor((s) => s.featureEval);
+  const features = featuresOf(doc).length;
+  if (features === 0) return null;
+  const solids = featureEval.items.filter((i) => i.status === 'ok' && i.verts.length > 0).length;
+  return (
+    <span
+      className={`status-chip mono ${solids === features ? 'dim' : 'warn'}`}
+      title={`特征 ${features} 个，其中 ${solids} 个求出了实体（抑制 / 报错 / 被布尔消耗的不算）`}
+    >
+      特征 {features} · 实体 {solids}
+    </span>
   );
 }
 

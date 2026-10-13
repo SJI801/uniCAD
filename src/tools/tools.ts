@@ -1383,38 +1383,38 @@ export class HoleTool extends BaseTool {
 // ---------------------------------------------------------------------------
 
 /**
- * Loft: pick one closed section, switch to the other's sketch, pick the second.
+ * Loft: pick sections one after another, `Enter` when the list is done.
  *
- * **Two picks in two sketches, and that is the feature.** A loft is what turns
- * "a small circle here, a big circle up there" into a tapered pipe, so the two
- * sections live on different planes by construction — which is also why this is
- * the first tool that expects the user to *switch sketches in the middle*: the
- * first pick is kept while the second is made somewhere else. Editing either
- * sketch afterwards re-skins the whole solid.
+ * **Two picks in two sketches is the minimum case, not the only one.** A loft is
+ * what turns "a small circle here, a big circle up there" into a tapered pipe —
+ * and the same tool with a third section turns it into a barrel. The section
+ * list has no fixed length: each pick appends, and Enter commits.
  *
- * Two sections is the common case; the document model already takes a list, so
- * a chain of sections is a UI question rather than a kernel one.
+ * The picks span sketches by construction, which is why this is the first tool
+ * that expects the user to *switch sketches in the middle*: everything picked so
+ * far is kept while the next one is made somewhere else. Editing any of those
+ * sketches afterwards re-skins the whole solid.
  */
 export class LoftTool extends BaseTool {
   readonly id = 'loft';
   readonly name = '放样';
   readonly alias = 'LOFT';
-  readonly initialPrompt = 'LOFT 点第一个封闭截面（第二个截面的草图要在另一个基准面上）:';
+  readonly initialPrompt = 'LOFT 点第一个封闭截面（后面的截面要在其他基准面上）:';
 
-  private firstId: EntityId | null = null;
+  private picked: EntityId[] = [];
 
   override activate(): void {
     super.activate();
-    this.firstId = null;
+    this.picked = [];
   }
 
   override cancel(): void {
     super.cancel();
-    this.firstId = null;
+    this.picked = [];
   }
 
   override anchor(): Vec2 | null {
-    // Picks name objects; neither is a placement.
+    // Picks name objects; none of them is a placement.
     return null;
   }
 
@@ -1422,14 +1422,50 @@ export class LoftTool extends BaseTool {
     return EMPTY_PREVIEW;
   }
 
+  /** The prompt that matches how many sections are already in hand. */
+  private promptNow(): string {
+    if (this.picked.length === 0) return this.initialPrompt;
+    if (this.picked.length === 1) {
+      return 'LOFT 已选 1 个截面 —— 切到另一个基准面的草图，点下一个截面（回车结束）:';
+    }
+    return `LOFT 已选 ${this.picked.length} 个截面 —— 点下一个截面，或回车开始蒙皮:`;
+  }
+
   handle(ev: ToolEvent, ctx: ToolContext): ToolResult {
-    if (
-      ev.kind === 'escape' ||
-      ev.kind === 'enter' ||
-      (ev.kind === 'click' && ev.button === 'right')
-    ) {
+    const cancel = (): ToolResult => {
       this.reset();
-      this.firstId = null;
+      this.picked = [];
+      return { preview: EMPTY_PREVIEW, done: true, prompt: this.initialPrompt };
+    };
+
+    if (ev.kind === 'escape' || (ev.kind === 'click' && ev.button === 'right')) return cancel();
+
+    // Enter finishes the list — but only a list that can actually bound a
+    // solid. With fewer than two sections there is nothing to commit, so the
+    // command stays armed rather than ending with a shrug.
+    if (ev.kind === 'enter') {
+      if (this.picked.length < 2) {
+        return {
+          preview: EMPTY_PREVIEW,
+          done: false,
+          prompt: '放样至少需要两个截面 —— 请继续点（或按 Esc 放弃）:',
+        };
+      }
+      const sections = this.picked;
+      const last = sketchOfEntity(ctx.doc, sections[sections.length - 1]!);
+      const feature: LoftFeature = {
+        kind: 'loft',
+        id: newFeatureId(),
+        name: nextFeatureName(ctx.doc, 'loft'),
+        sections,
+        layer: ctx.currentLayer(),
+      };
+      // Inserted right after the last section's sketch: every section is a
+      // sketch, and the tree reads "these, then what was skinned between them".
+      ctx.commit(
+        command('放样', addFeature(feature, featureInsertIndex(ctx.doc, last?.id ?? ctx.doc.activeSketch))),
+      );
+      this.picked = [];
       return { preview: EMPTY_PREVIEW, done: true, prompt: this.initialPrompt };
     }
 
@@ -1438,55 +1474,31 @@ export class LoftTool extends BaseTool {
       if (!id) {
         return { preview: EMPTY_PREVIEW, done: false, prompt: '没点到对象，请点在一个封闭轮廓上:' };
       }
-      if (!this.firstId) {
-        this.firstId = id;
-        return {
-          preview: EMPTY_PREVIEW,
-          done: false,
-          prompt: 'LOFT 已选第一个截面 —— 切到另一个基准面的草图，点第二个截面:',
-        };
+      if (this.picked.includes(id)) {
+        return { preview: EMPTY_PREVIEW, done: false, prompt: '这个轮廓已经选过了，请点另一个:' };
       }
-      if (id === this.firstId) {
-        return { preview: EMPTY_PREVIEW, done: false, prompt: '第二个截面不能就是第一个，请点另一个轮廓:' };
-      }
-      const a = sketchOfEntity(ctx.doc, this.firstId);
-      const b = sketchOfEntity(ctx.doc, id);
-      if (!a || !b) {
+      const sketch = sketchOfEntity(ctx.doc, id);
+      if (!sketch) {
         return { preview: EMPTY_PREVIEW, done: false, prompt: '轮廓必须属于某张草图，请重新点:' };
       }
-      // Two sections on one plane cannot bound a solid — the loft would have to
-      // go sideways inside its own sections. Caught here, while the user is
-      // still in the command, rather than as a red node afterwards.
-      if (a.plane === b.plane) {
+      // Sections on one plane cannot bound a solid between them — the loft would
+      // have to go sideways inside its own sections. Caught here, while the user
+      // is still in the command, rather than as a red node afterwards.
+      const usedPlanes = new Set(
+        this.picked.map((p) => sketchOfEntity(ctx.doc, p)?.plane).filter((p) => p !== undefined),
+      );
+      if (usedPlanes.has(sketch.plane)) {
         return {
           preview: EMPTY_PREVIEW,
           done: false,
-          prompt: '两个截面在同一平面上 —— 先切到别的基准面（或新建一个偏移基准面）再画第二个截面:',
+          prompt: '这个平面已经用过一张截面了（放样需要不同平面的截面）—— 先切面或新建偏移基准面:',
         };
       }
-      const sections = [this.firstId, id];
-      const feature: LoftFeature = {
-        kind: 'loft',
-        id: newFeatureId(),
-        name: nextFeatureName(ctx.doc, 'loft'),
-        sections,
-        layer: ctx.currentLayer(),
-      };
-      // Inserted right after the last section's sketch: both sections are
-      // sketches, and the tree reads "these two, then what was skinned between
-      // them".
-      ctx.commit(command('放样', addFeature(feature, featureInsertIndex(ctx.doc, b.id))));
-      this.firstId = null;
-      return { preview: EMPTY_PREVIEW, done: true, prompt: this.initialPrompt };
+      this.picked.push(id);
+      return { preview: EMPTY_PREVIEW, done: false, prompt: this.promptNow() };
     }
 
-    return {
-      preview: EMPTY_PREVIEW,
-      done: false,
-      prompt: this.firstId
-        ? 'LOFT 已选第一个截面 —— 切到另一个基准面的草图，点第二个截面:'
-        : this.initialPrompt,
-    };
+    return { preview: EMPTY_PREVIEW, done: false, prompt: this.promptNow() };
   }
 }
 
