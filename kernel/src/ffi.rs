@@ -1322,51 +1322,35 @@ pub fn pick_mesh(mesh: &[f32], origin: &[f64], dir: &[f64]) -> Vec<f64> {
     }
 }
 
-/// Drill a cylindrical hole into `solid`, in one call.
+/// Drill a hole into `solid`, in one call.
 ///
 /// `point` is on the surface, `normal` is that face's **outward** normal (the
-/// hole runs the other way), `depth` is how far it goes into the material —
-/// zero or negative means through. `count_u`/`spacing_u` and `count_v`/
-/// `spacing_v` turn the single hole into a **grid** on the face's own in-plane
-/// axes (`1 × 1` = just the one). `bore_diameter`/`bore_depth` add a wider,
-/// shallower recess at each entry (0 = none). Same wire format as the other mesh
-/// entry points; `vertexCount == 0` means the cut removed everything, which the
-/// caller reports in words.
-#[allow(clippy::too_many_arguments)]
+/// hole runs the other way). `spec` is ten floats, in `boolean::HoleSpec` field
+/// order: `diameter, depth, count_u, spacing_u, count_v, spacing_v,
+/// bore_diameter, bore_depth, csk_diameter, csk_depth` — one hole, a grid of
+/// them, and optionally a counterbore and/or a conical countersink at each
+/// entry. See that struct's doc for what each means. Same wire format as the
+/// other mesh entry points; `vertexCount == 0` means the cut removed
+/// everything, which the caller reports in words.
 #[wasm_bindgen]
 pub fn hole_mesh(
     solid: &[f32],
     point: &[f64],
     normal: &[f64],
-    diameter: f64,
-    depth: f64,
-    count_u: u32,
-    spacing_u: f64,
-    count_v: u32,
-    spacing_v: f64,
-    bore_diameter: f64,
-    bore_depth: f64,
+    spec: &[f64],
     tol: f64,
     max_seg: u32,
 ) -> Vec<f32> {
-    let verts = if point.len() >= 3 && normal.len() >= 3 {
-        crate::boolean::subtract_hole_grid(
+    let verts = match (point.len() >= 3, normal.len() >= 3, crate::boolean::HoleSpec::from_slice(spec)) {
+        (true, true, Some(spec)) => crate::boolean::subtract_hole_grid(
             solid,
             [point[0], point[1], point[2]],
             [normal[0], normal[1], normal[2]],
-            diameter,
-            depth,
-            count_u,
-            spacing_u,
-            count_v,
-            spacing_v,
-            bore_diameter,
-            bore_depth,
+            &spec,
             tol,
             max_seg,
-        )
-    } else {
-        solid.to_vec()
+        ),
+        _ => solid.to_vec(),
     };
     let mut out: Vec<f32> = Vec::with_capacity(1 + verts.len());
     out.push((verts.len() / 6) as f32);

@@ -179,13 +179,15 @@ export interface KernelModule {
    * which is what a hole's axis must follow.
    */
   pick_mesh(mesh: Float32Array, origin: Float64Array, dir: Float64Array): Float64Array;
-  /** Drill one hole, a row, or a grid — see `subtract_hole_grid` in the kernel. */
+  /**
+   * Drill a hole (or a grid of them) — see `boolean::HoleSpec` in the kernel.
+   *
+   * `spec` is ten floats in `HoleSpec` field order: `diameter, depth, countU,
+   * spacingU, countV, spacingV, boreDiameter, boreDepth, cskDiameter, cskDepth`.
+   */
   hole_mesh(
     solid: Float32Array, point: Float64Array, normal: Float64Array,
-    diameter: number, depth: number,
-    countU: number, spacingU: number, countV: number, spacingV: number,
-    boreDiameter: number, boreDepth: number,
-    tol: number, maxSeg: number,
+    spec: Float64Array, tol: number, maxSeg: number,
   ): Float32Array;
   /**
    * Skin closed sections into one solid (work package 3.4). `frames` is nine
@@ -1192,14 +1194,14 @@ export function pickMesh(
 }
 
 /**
- * Drill a hole into `solid`: the kernel builds the cylindrical cutter from the
- * face and subtracts it, so no part of "which way does the axis point" has to
- * be agreed on twice.
+ * Drill a hole into `solid`: the kernel builds the cutters from the face and
+ * subtracts them, so no part of "which way does the axis point" has to be agreed
+ * on twice.
  *
  * `depth === 0` means through. `countU × countV` drills a **grid** on the face's
- * own in-plane axes, `spacingU`/`spacingV` apart, the first at `point` — one
- * cutter soup, one boolean pass, however many instances. `boreDiameter`/
- * `boreDepth` add a wider recess at each entry (`0` = none).
+ * own in-plane axes, `spacingU`/`spacingV` apart, the first at `point`. A
+ * counterbore (`boreDiameter`/`boreDepth`) and a countersink
+ * (`cskDiameter`/`cskDepth`) widen the entry; `0` means none.
  *
  * `null` means the cut left no solid at all.
  */
@@ -1207,29 +1209,39 @@ export function holeMesh(
   solid: Float32Array,
   point: readonly [number, number, number],
   normal: readonly [number, number, number],
-  diameter: number,
-  depth: number,
-  countU = 1,
-  spacingU = 0,
-  countV = 1,
-  spacingV = 0,
-  boreDiameter = 0,
-  boreDepth = 0,
+  spec: {
+    diameter: number;
+    depth: number;
+    countU?: number;
+    spacingU?: number;
+    countV?: number;
+    spacingV?: number;
+    boreDiameter?: number;
+    boreDepth?: number;
+    cskDiameter?: number;
+    cskDepth?: number;
+  },
   tol = 0.05,
   maxSeg = 256,
 ): Float32Array | null {
+  // The wire layout the kernel unpacks, in `HoleSpec` field order.
+  const packed = Float64Array.from([
+    spec.diameter,
+    spec.depth,
+    spec.countU ?? 1,
+    spec.spacingU ?? 0,
+    spec.countV ?? 1,
+    spec.spacingV ?? 0,
+    spec.boreDiameter ?? 0,
+    spec.boreDepth ?? 0,
+    spec.cskDiameter ?? 0,
+    spec.cskDepth ?? 0,
+  ]);
   const out = kernel().hole_mesh(
     solid,
     Float64Array.from(point),
     Float64Array.from(normal),
-    diameter,
-    depth,
-    countU,
-    spacingU,
-    countV,
-    spacingV,
-    boreDiameter,
-    boreDepth,
+    packed,
     tol,
     maxSeg,
   );

@@ -286,21 +286,20 @@ function evalPattern(
 
   if (!isKernelReady()) return { feature: f, status: 'ok', verts: EMPTY_VERTS };
 
-  const verts = holeMesh(
-    base,
-    source.at,
-    source.normal,
-    source.diameter,
-    source.depth,
-    count,
-    f.spacing,
+  const verts = holeMesh(base, source.at, source.normal, {
+    diameter: source.diameter,
+    depth: source.depth,
+    countU: count,
+    spacingU: f.spacing,
     countV,
-    f.spacingV,
-    // The pattern repeats the source *hole*, counterbore and all — one place to
+    spacingV: f.spacingV,
+    // The pattern repeats the source *hole*, its recesses and all — one place to
     // read the source's parameters, so the copies cannot drift from it.
-    source.boreDiameter,
-    source.boreDepth,
-  );
+    boreDiameter: source.boreDiameter,
+    boreDepth: source.boreDepth,
+    cskDiameter: source.cskDiameter,
+    cskDepth: source.cskDepth,
+  });
   if (!verts) return fail('阵列后没有剩余实体');
   return { feature: f, status: 'ok', verts };
 }
@@ -353,10 +352,12 @@ function evalHole(f: HoleFeature, meshes: ReadonlyMap<FeatureId, Float32Array>):
   // silent no-op.
   if (!(f.diameter > 0)) return fail('直径必须大于 0');
   if (!Number.isFinite(f.depth) || f.depth < 0) return fail('深度不能是负数（0 = 通孔）');
-  // A counterbore that is not wider than the hole, or has no depth, would cut
+  // A recess that is not wider than the hole, or has no depth, would cut
   // nothing — say so instead of ignoring the parameter the user just typed.
   if (f.boreDiameter > 0 && !(f.boreDepth > 0)) return fail('沉孔深度必须大于 0（沉孔直径填 0 表示不沉孔）');
   if (f.boreDiameter > 0 && !(f.boreDiameter > f.diameter)) return fail('沉孔直径必须大于孔径');
+  if (f.cskDiameter > 0 && !(f.cskDepth > 0)) return fail('锥沉深度必须大于 0（锥沉直径填 0 表示不锥沉）');
+  if (f.cskDiameter > 0 && !(f.cskDiameter > f.diameter)) return fail('锥沉直径必须大于孔径');
 
   const solid = meshes.get(f.solid);
   // Same rule as a boolean's operands: the base must already have evaluated.
@@ -365,7 +366,14 @@ function evalHole(f: HoleFeature, meshes: ReadonlyMap<FeatureId, Float32Array>):
 
   if (!isKernelReady()) return { feature: f, status: 'ok', verts: EMPTY_VERTS };
 
-  const verts = holeMesh(solid, f.at, f.normal, f.diameter, f.depth, 1, 0, 1, 0, f.boreDiameter, f.boreDepth);
+  const verts = holeMesh(solid, f.at, f.normal, {
+    diameter: f.diameter,
+    depth: f.depth,
+    boreDiameter: f.boreDiameter,
+    boreDepth: f.boreDepth,
+    cskDiameter: f.cskDiameter,
+    cskDepth: f.cskDepth,
+  });
   if (!verts) return fail('打孔后没有剩余实体');
   return { feature: f, status: 'ok', verts };
 }

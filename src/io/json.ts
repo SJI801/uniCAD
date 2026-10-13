@@ -186,6 +186,8 @@ function encodeNode(n: TreeNode): Record<string, unknown> {
           depth: f.depth,
           boreDiameter: f.boreDiameter,
           boreDepth: f.boreDepth,
+          cskDiameter: f.cskDiameter,
+          cskDepth: f.cskDepth,
           layer: f.layer,
         },
       };
@@ -725,6 +727,8 @@ function decodeFeatureNode(raw: unknown): Feature | null {
       // "no counterbore" rather than "invalid".
       const boreDiameter = num(o['boreDiameter'], 0);
       const boreDepth = num(o['boreDepth'], 0);
+      const cskDiameter = num(o['cskDiameter'], 0);
+      const cskDepth = num(o['cskDepth'], 0);
       if (solid && at && normal && Number.isFinite(diameter) && Number.isFinite(depth)) {
         return {
           kind: 'hole',
@@ -738,6 +742,8 @@ function decodeFeatureNode(raw: unknown): Feature | null {
           depth,
           boreDiameter,
           boreDepth,
+          cskDiameter,
+          cskDepth,
           layer,
         };
       }
